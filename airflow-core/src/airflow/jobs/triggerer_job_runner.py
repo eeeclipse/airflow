@@ -519,7 +519,14 @@ class TriggerRunnerSupervisor(WatchedSubprocess):
                 resp = xcom
         elif isinstance(msg, SetXCom):
             self.client.xcoms.set(
-                msg.dag_id, msg.run_id, msg.task_id, msg.key, msg.value, msg.map_index, msg.mapped_length
+                msg.dag_id,
+                msg.run_id,
+                msg.task_id,
+                msg.key,
+                msg.value,
+                msg.map_index,
+                dag_result=msg.dag_result,
+                mapped_length=msg.mapped_length,
             )
         elif isinstance(msg, GetDRCount):
             dr_count = self.client.dag_runs.get_count(
@@ -705,6 +712,9 @@ class TriggerRunnerSupervisor(WatchedSubprocess):
             # it means we need to load the SerializedDagModel so we can build a RuntimeTaskInstance later on which
             # will allow us to build a context on which we will render the templated fields.
             if task.start_from_trigger:
+                log.info("Start from trigger enabled for task %s", task.task_id)
+                dag_run = trigger.task_instance.get_dagrun(session=session)
+
                 return workloads.RunTrigger(
                     id=trigger.id,
                     classpath=trigger.classpath,
@@ -712,6 +722,7 @@ class TriggerRunnerSupervisor(WatchedSubprocess):
                     ti=ser_ti,
                     timeout_after=trigger.task_instance.trigger_timeout,
                     dag_data=serialized_dag_model.data,
+                    dag_run_data=dag_run.dag_run_data.model_dump(exclude_unset=True),
                 )
         return workloads.RunTrigger(
             id=trigger.id,
@@ -872,12 +883,14 @@ class TriggerCommsDecoder(CommsDecoder[ToTriggerRunner, ToTriggerSupervisor]):
     def _read_frame(self):
         from asgiref.sync import async_to_sync
 
-        return async_to_sync(self._aread_frame)()
+        with self._thread_lock:
+            return async_to_sync(self._aread_frame)()
 
     def send(self, msg: ToTriggerSupervisor) -> ToTriggerRunner | None:
         from asgiref.sync import async_to_sync
 
-        return async_to_sync(self.asend)(msg)
+        with self._thread_lock:
+            return async_to_sync(self.asend)(msg)
 
     async def _aread_frame(self):
         try:
@@ -1036,16 +1049,26 @@ class TriggerRunner:
         if not isinstance(msg, messages.StartTriggerer):
             raise RuntimeError(f"Required first message to be a messages.StartTriggerer, it was {msg}")
 
+    @classmethod
+    def create_runtime_ti(
+        cls, task_instance: TaskInstanceDTO, encoded_dag: dict, dag_run_data: dict
+    ) -> RuntimeTaskInstance:
+        from airflow.api_fastapi.execution_api.datamodels.taskinstance import DagRun as DRDataModel
+        from airflow.sdk.api.datamodels._generated import TIRunContext
+
+        task = DagSerialization.from_dict(encoded_dag).get_task(task_instance.task_id)
+
+        # I need to recreate a TaskInstance from task_runner before invoking get_template_context (airflow.executors.workloads.TaskInstance)
+        return RuntimeTaskInstance.model_construct(
+            **task_instance.model_dump(exclude_unset=True),
+            task=task,
+            _ti_context_from_server=TIRunContext.model_construct(
+                dag_run=DRDataModel(**dag_run_data),
+                max_tries=task.retries,
+            ),
+        )
+
     async def create_triggers(self):
-        def create_runtime_ti(encoded_dag: dict) -> RuntimeTaskInstance:
-            task = DagSerialization.from_dict(encoded_dag).get_task(workload.ti.task_id)
-
-            # I need to recreate a TaskInstance from task_runner before invoking get_template_context (airflow.executors.workloads.TaskInstance)
-            return RuntimeTaskInstance.model_construct(
-                **workload.ti.model_dump(exclude_unset=True),
-                task=task,
-            )
-
         """Drain the to_create queue and create all new triggers that have been requested in the DB."""
         while self.to_create:
             await asyncio.sleep(0)
@@ -1083,7 +1106,7 @@ class TriggerRunner:
                     trigger_instance = trigger_class(**deserialised_kwargs)
 
                     if workload.dag_data:
-                        runtime_ti = create_runtime_ti(workload.dag_data)
+                        runtime_ti = self.create_runtime_ti(ti, workload.dag_data, workload.dag_run_data)
                         context = runtime_ti.get_template_context()
                         trigger_instance.task_instance = runtime_ti
                     else:
@@ -1282,7 +1305,16 @@ class TriggerRunner:
 
             await greenback.ensure_portal()
 
-        bind_log_contextvars(trigger_id=trigger_id)
+        ti = trigger.task_instance
+        bind_log_contextvars(
+            trigger_id=trigger_id,
+            ti_id=str(ti.id) if ti else None,
+            dag_id=ti.dag_id if ti else None,
+            task_id=ti.task_id if ti else None,
+            run_id=ti.run_id if ti else None,
+            try_number=ti.try_number if ti else None,
+            map_index=ti.map_index if ti else None,
+        )
 
         name = self.triggers[trigger_id]["name"]
         self.log.info("trigger %s starting", name)

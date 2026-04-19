@@ -104,19 +104,46 @@ This caused a side effect where we won't be able to use following versions in fu
 - [1.0.0rc1](https://pypi.org/project/apache-airflow-ctl/1.0.0rc1/)
 - [1.0.0rc2](https://pypi.org/project/apache-airflow-ctl/1.0.0rc2/)
 
-Set version env variable
+Set version env variables — **all commands in this document rely on these being set in your
+current shell session**. Replace the values with the actual versions for your release.
 
 ```shell script
-VERSION=0.1.0
-VERSION_SUFFIX=rc1
-VERSION_RC=${VERSION}${VERSION_SUFFIX}
+export PREVIOUS_VERSION=0.1.3
+export VERSION=0.1.4
+export VERSION_SUFFIX=rc1
+export VERSION_RC=${VERSION}${VERSION_SUFFIX}
+```
+
+Verify they are set before running any command:
+
+```shell script
+echo "Previous: ${PREVIOUS_VERSION}  Current: ${VERSION}  RC: ${VERSION_RC}"
 ```
 
 # Prepare Regular airflow-ctl distributions (RC)
 
 ## Generate release notes
 
-TODO: Describe release notes preparation
+Generate the RST changelog for the new release by running:
+
+```shell script
+breeze release-management generate-airflowctl-changelog --previous-release "airflow-ctl/${PREVIOUS_VERSION}" --version "${VERSION}"
+```
+
+`--current-release` defaults to `HEAD` so you do not need to tag first.
+The command fetches PR metadata from GitHub (using `gh auth token` or `GITHUB_TOKEN`) and
+categorises each merged PR into one of:
+
+- **Significant Changes** — PRs whose title starts with `feat`, `add`, or `allow`
+- **Bug Fixes** — PRs whose title starts with `fix`
+- **Improvements** — everything else that is user-visible
+- **Miscellaneous** — CI / build / upgrade changes
+
+By default, the new section is **prepended** to `airflow-ctl/RELEASE_NOTES.rst` before the
+previous version entry. Pass `--output-file -` to print to stdout instead, or
+`--output-file <path>` to write to a different file.
+
+Review the changes to `airflow-ctl/RELEASE_NOTES.rst` and commit before proceeding.
 
 ## Build airflow-ctl distributions for SVN apache upload
 
@@ -364,7 +391,11 @@ list and stable links should be updated, also Fastly cache will be invalidated.
 
 ## Prepare issue in GitHub to keep status of testing
 
-TODO: prepare an issue
+Generate the GitHub issue body that asks contributors to test the RC:
+
+```shell script
+breeze release-management generate-issue-content-airflow-ctl --previous-release "airflow-ctl/${PREVIOUS_VERSION}" --current-release "airflow-ctl/${VERSION_RC}"
+```
 
 ## Prepare voting email for airflow-ctl release candidate
 
@@ -536,7 +567,7 @@ You can use the `breeze release-management check-release-files` command to verif
 present in SVN. This command may also help with verifying installation of the packages.
 
 ```shell script
-breeze release-management check-release-files airflow-ctl --version ${VERSION_RC}
+breeze release-management check-release-files airflow-ctl --version ${VERSION_RC} --path-to-airflow-svn=${PATH_TO_AIRFLOW_SVN}
 ```
 
 You will see commands that you can execute to check installation of the distributions in containers.
@@ -552,7 +583,7 @@ You can run this command to do it for you (including checksum verification for y
 ```shell script
 # Checksum value is taken from https://downloads.apache.org/creadur/apache-rat-0.18/apache-rat-0.18-bin.tar.gz.sha512
 wget -q https://archive.apache.org/dist/creadur/apache-rat-0.18/apache-rat-0.18-bin.tar.gz -O /tmp/apache-rat-0.18-bin.tar.gz
-echo "32848673dc4fb639c33ad85172dfa9d7a4441a0144e407771c9f7eb6a9a0b7a9b557b9722af968500fae84a6e60775449d538e36e342f786f20945b1645294a0  /tmp/apache-rat-0.18-bin.tar.gz" | sha512sum -c -
+echo "315b16536526838237c42b5e6b613d29adc77e25a6e44a866b2b7f8b162e03d3629d49c9faea86ceb864a36b2c42838b8ce43d6f2db544e961f2259e242748f4  /tmp/apache-rat-0.18-bin.tar.gz" | sha512sum -c -
 tar -xzf /tmp/apache-rat-0.18-bin.tar.gz -C /tmp
 ```
 
