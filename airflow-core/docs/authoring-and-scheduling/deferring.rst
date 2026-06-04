@@ -116,6 +116,11 @@ A *Trigger* is written as a class that inherits from ``BaseTrigger``, and implem
 * ``run``: An asynchronous method that runs its logic and yields one or more ``TriggerEvent`` instances as an asynchronous generator.
 * ``serialize``: Returns the information needed to re-construct this trigger, as a tuple of the classpath, and keyword arguments to pass to ``__init__``.
 
+Two optional lifecycle hooks are also available:
+
+* ``cleanup``: Called after ``run`` exits for any reason (success, timeout, triggerer shutdown, or user kill). Use this to release local resources held by the trigger instance, such as open connections or temporary files.
+* ``on_kill``: Called only when a user explicitly kills the deferred task (mark-failed, clear, or mark-succeeded). Use this to cancel external work — for example, cancelling a BigQuery job or terminating a Databricks run — that you do not want to keep running after the user acts on the task. Unlike ``cleanup``, ``on_kill`` is **not** called on triggerer restart or redistribution, so you can safely put external cancellation logic here without risk of cancelling in-flight work during a rolling deploy.
+
 This example shows the structure of a basic trigger, a very simplified version of Airflow's ``DateTimeTrigger``:
 
 .. code-block:: python
@@ -155,7 +160,7 @@ There's some design constraints to be aware of when writing your own trigger:
 * ``run`` must ``yield`` its TriggerEvents, not return them. If it returns before yielding at least one event, Airflow will consider this an error and fail any Task Instances waiting on it. If it throws an exception, Airflow will also fail any dependent task instances.
 * You should assume that a trigger instance can run *more than once*. This can happen if a network partition occurs and Airflow re-launches a trigger on a separated machine. So, you must be mindful about side effects. For example you might not want to use a trigger to insert database rows.
 * If your trigger is designed to emit more than one event (not currently supported), then each emitted event *must* contain a payload that can be used to deduplicate events if the trigger is running in multiple places. If you only fire one event and don't need to pass information back to the operator, you can just set the payload to ``None``.
-* A trigger can suddenly be removed from one triggerer service and started on a new one. For example, if subnets are changed and a network partition results or if there is a deployment. If desired, you can implement the ``cleanup`` method, which is always called after ``run``, whether the trigger exits cleanly or otherwise.
+* A trigger can suddenly be removed from one triggerer service and started on a new one. For example, if subnets are changed and a network partition results or if there is a deployment. If desired, you can implement the ``cleanup`` method, which is always called after ``run``, whether the trigger exits cleanly or otherwise. If you need to cancel external work when a user explicitly kills the task, implement ``on_kill`` instead — it is only called for user-initiated cancellations, not on restart or redistribution.
 * In order for any changes to a trigger to be reflected, the *triggerer* needs to be restarted whenever the trigger is modified.
 * Your trigger must not come from a Dag bundle - anywhere else on ``sys.path`` is fine. The triggerer does not initialize any bundles when running a trigger.
 
@@ -488,6 +493,14 @@ Under some circumstances, it may be desirable to assign a Trigger to a specific 
 
 * In a multi-tenant Airflow system where you run a distinct set of ``triggerers`` per team.
 * Running distinct sets of ``triggerers`` hosts, where each set of hosts are configured for different trigger operations (e.g. each set of triggerers may have different cloud permissions).
+
+.. tip::
+
+    If you are using :doc:`Multi-Team mode</core-concepts/multi-team>`, the ``--team-name`` option provides
+    native team-scoped triggerer assignment for all trigger types (task-created, event-driven, and callback).
+    See :ref:`Team-scoped Triggerer <multi-team-triggerer>` in the Multi-Team documentation.
+    The ``--queues`` option described below is an older, queue-based mechanism that can be combined with
+    ``--team-name`` if needed.
 
 To enable queue assignment for triggers, do the following:
 
