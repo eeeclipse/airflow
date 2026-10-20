@@ -16,20 +16,26 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { HStack, Box, Text, Code } from "@chakra-ui/react";
-import { useReactFlow } from "@xyflow/react";
 import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import { useParams, useSearchParams } from "react-router-dom";
 
-import { useAssetServiceGetAsset, useAssetServiceGetAssetEvents } from "openapi/queries";
-import { AssetEvents } from "src/components/Assets/AssetEvents";
-import { BreadcrumbStats } from "src/components/BreadcrumbStats";
-import { useTableURLState } from "src/components/DataTable/useTableUrlState";
-import { ProgressBar } from "src/components/ui";
-import { SearchParamsKeys } from "src/constants/searchParams";
+import { Box, Code, HStack, Text } from "@chakra-ui/react";
+import { useReactFlow } from "@xyflow/react";
+import { useTranslation } from "react-i18next";
+import { MdOutlineStorage, MdTimeline } from "react-icons/md";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
+import { Outlet, useParams } from "react-router-dom";
+
+import { useAssetServiceGetAsset } from "openapi/queries";
+
+import { ProgressBar } from "src/system-components";
+
+import { NavTabs } from "src/layouts/Details/NavTabs";
+
+import { BreadcrumbRow, CrumbStack, CrumbText } from "src/components/Breadcrumb";
+
 import { GroupsProvider } from "src/context/groups";
+import { usePluginTabs } from "src/hooks/usePluginTabs";
+import { useDocumentTitle } from "src/utils";
 
 import { AssetGraph } from "./AssetGraph";
 import { AssetPanelButtons } from "./AssetPanelButtons";
@@ -42,11 +48,6 @@ export const AssetLayout = () => {
   const direction = i18n.dir();
   const [dependencyType, setDependencyType] = useState<"data" | "scheduling">("scheduling");
 
-  const { setTableURLState, tableURLState } = useTableURLState();
-  const { pagination, sorting } = tableURLState;
-  const [sort] = sorting;
-  const orderBy = sort ? [`${sort.desc ? "-" : ""}${sort.id}`] : ["-timestamp"];
-
   const { data: asset, isLoading } = useAssetServiceGetAsset(
     { assetId: assetId === undefined ? 0 : parseInt(assetId, 10) },
     undefined,
@@ -55,114 +56,112 @@ export const AssetLayout = () => {
     },
   );
 
-  const links = [
-    {
-      label: asset?.name,
-      title: translate("common:asset_one"),
-      value: `/assets/${assetId}`,
-    },
-  ];
-
-  const { DAG_ID, END_DATE, START_DATE, TASK_ID } = SearchParamsKeys;
-  const [searchParams] = useSearchParams();
-  const { data, isLoading: isLoadingEvents } = useAssetServiceGetAssetEvents(
-    {
-      assetId: asset?.id,
-      limit: pagination.pageSize,
-      offset: pagination.pageIndex * pagination.pageSize,
-      orderBy,
-      sourceDagId: searchParams.get(DAG_ID) ?? undefined,
-      sourceTaskId: searchParams.get(TASK_ID) ?? undefined,
-      timestampGte: searchParams.get(START_DATE) ?? undefined,
-      timestampLte: searchParams.get(END_DATE) ?? undefined,
-    },
-    undefined,
-    { enabled: Boolean(asset?.id) },
-  );
-
-  const setOrderBy = (value: string) => {
-    setTableURLState({
-      pagination,
-      sorting: [
-        {
-          desc: value.startsWith("-"),
-          id: value.replace("-", ""),
-        },
-      ],
-    });
-  };
+  useDocumentTitle(asset?.name);
 
   const { fitView, getZoom } = useReactFlow();
 
+  const { defaultLayout, onLayoutChanged } = useDefaultLayout({ id: `asset-${direction}` });
+
+  const externalTabs = usePluginTabs("asset");
+
+  const tabs = [
+    { icon: <MdTimeline />, label: translate("assets:events"), value: "" },
+    {
+      icon: <MdOutlineStorage />,
+      label: translate("assets:assetStateStore.title"),
+      value: "asset-state-store",
+    },
+    ...externalTabs,
+  ];
+
   return (
     <>
-      <HStack justifyContent="space-between" mb={2}>
-        <BreadcrumbStats links={links} />
-        <CreateAssetEvent asset={asset} />
+      <HStack justifyContent="space-between" mb={3}>
+        <BreadcrumbRow aria-label={translate("common:breadcrumb")} data-testid="asset-breadcrumb">
+          <CrumbText shape={{ hasNotch: false, hasPoint: false }}>
+            <CrumbStack
+              caption={translate("common:asset_one")}
+              isCurrent
+              value={asset?.name ?? assetId ?? ""}
+            />
+          </CrumbText>
+        </BreadcrumbRow>
+        <CreateAssetEvent asset={asset} variant="outline" withText />
       </HStack>
       <ProgressBar size="xs" visibility={Boolean(isLoading) ? "visible" : "hidden"} />
       <Box flex={1} minH={0}>
-        <PanelGroup
-          autoSaveId={`asset-${direction}`}
+        <Group
+          defaultLayout={defaultLayout}
           dir={direction}
-          direction="horizontal"
           key={`asset-${direction}`}
+          onLayoutChanged={(layout, meta) => {
+            onLayoutChanged(layout, meta);
+            if (meta.isUserInteraction) {
+              const zoom = getZoom();
+
+              void fitView({ maxZoom: zoom, minZoom: zoom });
+            }
+          }}
+          orientation="horizontal"
         >
-          <Panel defaultSize={70} minSize={6}>
-            <Box height="100%" position="relative" pr={2}>
+          <Panel defaultSize={70} id="asset-graph" minSize={6}>
+            <Box
+              borderColor="bg.muted"
+              borderRadius="md"
+              borderWidth="2px"
+              height="calc(100% - 12px)" // 12px = 3units of padding
+              overflow="hidden"
+              position="relative"
+            >
               <AssetPanelButtons dependencyType={dependencyType} setDependencyType={setDependencyType} />
               <GroupsProvider dagId="~">
                 <AssetGraph asset={asset} dependencyType={dependencyType} />
               </GroupsProvider>
             </Box>
           </Panel>
-          <PanelResizeHandle
-            className="resize-handle"
-            onDragging={(isDragging) => {
-              if (!isDragging) {
-                const zoom = getZoom();
+          <Separator className="resize-handle">
+            <Box
+              _hover={{ bg: "info.solid" }}
+              borderRadius="full"
+              cursor="col-resize"
+              height="calc(100% - 12px)" // 12px = 3units of padding
+              mb={3}
+              w={1}
+            />
+          </Separator>
+          <Panel defaultSize={30} id="asset-details" minSize={20}>
+            <Box
+              display="flex"
+              flexDirection="column"
+              gap={3}
+              paddingInlineStart={2} // not 3 because the transparent resize handle is 1 unit wide
+            >
+              <Header asset={asset} />
+              {asset?.extra && Object.keys(asset.extra).length > 0 ? (
+                <div>
+                  <Text fontWeight="bold" mb={2}>
+                    {translate("assets:additional_data")}
+                  </Text>
+                  <Code
+                    background="bg.subtle"
+                    borderRadius="md"
+                    color="fg.default"
+                    display="block"
+                    fontSize="sm"
+                    p={2}
+                    w="full"
+                    whiteSpace="pre"
+                  >
+                    {JSON.stringify(asset.extra, null, 2)}
+                  </Code>
+                </div>
+              ) : null}
 
-                void fitView({ maxZoom: zoom, minZoom: zoom });
-              }
-            }}
-          >
-            <Box bg="fg.subtle" cursor="col-resize" h="100%" transition="background 0.2s" w={0.5} />
-          </PanelResizeHandle>
-          <Panel defaultSize={30} minSize={20}>
-            <Header asset={asset} />
-            {asset?.extra && Object.keys(asset.extra).length > 0 ? (
-              <Box mb={3} mt={3} px={3}>
-                <Text fontWeight="bold" mb={2}>
-                  {translate("assets:additional_data")}
-                </Text>
-                <Code
-                  background="bg.subtle"
-                  borderRadius="md"
-                  color="fg.default"
-                  display="block"
-                  fontSize="sm"
-                  p={2}
-                  w="full"
-                  whiteSpace="pre"
-                >
-                  {JSON.stringify(asset.extra, null, 2)}
-                </Code>
-              </Box>
-            ) : null}
-
-            <Box h="100%" overflow="auto" pt={2}>
-              <AssetEvents
-                assetId={asset?.id}
-                data={data}
-                isLoading={isLoadingEvents}
-                setOrderBy={setOrderBy}
-                setTableUrlState={setTableURLState}
-                showFilters={true}
-                tableUrlState={tableURLState}
-              />
+              <NavTabs tabs={tabs} />
+              <Outlet />
             </Box>
           </Panel>
-        </PanelGroup>
+        </Group>
       </Box>
     </>
   );

@@ -16,15 +16,19 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import { useRef, type ChangeEvent } from "react";
+
 import { HStack } from "@chakra-ui/react";
-import { useRef } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
 import { LuRegex } from "react-icons/lu";
 
-import { AdvancedSearchToggle } from "src/components/AdvancedSearchToggle";
-import { useAdvancedSearch } from "src/hooks/useAdvancedSearch";
+import { InputWithAddon } from "src/system-components";
 
-import { InputWithAddon } from "../../ui";
+import { AdvancedSearchToggle } from "src/components/AdvancedSearchToggle";
+
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useAdvancedSearch } from "src/hooks/useAdvancedSearch";
+import { useShortcut } from "src/hooks/useShortcut";
+
 import { FilterPill } from "../FilterPill";
 import type { FilterPluginProps } from "../types";
 import { isValidFilterValue } from "../utils";
@@ -36,21 +40,21 @@ export const TextSearchFilter = ({ filter, onChange, onRemove }: FilterPluginPro
 
   const hasValue = isValidFilterValue(filter.config.type, filter.value);
 
-  const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const newValue = event.target.value;
 
     onChange(newValue || undefined);
   };
 
-  useHotkeys(
-    "mod+k",
-    () => {
+  useShortcut({
+    ...SHORTCUTS.search.focusFilterSearch,
+    callback: () => {
       if (!filter.config.hotkeyDisabled) {
         hotkeyInputRef.current?.focus();
       }
     },
-    { enabled: !filter.config.hotkeyDisabled, preventDefault: true },
-  );
+    options: { enabled: !filter.config.hotkeyDisabled, preventDefault: true },
+  });
 
   const isAdvanced = showAdvancedToggle && advanced.enabled;
   const stringValue = hasValue && typeof filter.value === "string" ? filter.value : "";
@@ -73,6 +77,7 @@ export const TextSearchFilter = ({ filter, onChange, onRemove }: FilterPluginPro
       renderInput={(props) => (
         <InputWithAddon
           {...props}
+          data-testid="filter-pill-input"
           endAddon={
             showAdvancedToggle ? (
               <AdvancedSearchToggle enabled={advanced.enabled} onToggle={advanced.onToggle} variant="addon" />

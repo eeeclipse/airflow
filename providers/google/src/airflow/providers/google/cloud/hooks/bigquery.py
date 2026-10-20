@@ -95,7 +95,17 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-BigQueryJob = CopyJob | QueryJob | LoadJob | ExtractJob
+BIGQUERY_LEGACY_SQL_DEFAULT_WARNING = (
+    "The default value of `use_legacy_sql` is deprecated and will change from `True` to `False` "
+    "in a future provider release. Set `use_legacy_sql=True` explicitly if you need legacy SQL, "
+    "or set `use_legacy_sql=False` to use GoogleSQL."
+)
+
+if TYPE_CHECKING:
+    BigQueryJob = CopyJob | QueryJob | LoadJob | ExtractJob
+else:
+    # Mocked google libs during docs build break the union, but the name must exist for runtime importers.
+    BigQueryJob = Any
 
 _ROUTINE_WRITABLE_PROPERTIES: tuple[str, ...] = (
     "type_",
@@ -190,7 +200,15 @@ class BigQueryHook(GoogleBaseHook, DbApiHook):
         # Use sentinel pattern to distinguish "not provided" from "explicitly provided"
         if use_legacy_sql is _UNSET:
             value = self._get_field("use_legacy_sql", _UNSET)
-            self.use_legacy_sql: bool = value if value is not None else True
+            if value is None:
+                warnings.warn(
+                    BIGQUERY_LEGACY_SQL_DEFAULT_WARNING,
+                    AirflowProviderDeprecationWarning,
+                    stacklevel=2,
+                )
+                self.use_legacy_sql = True
+            else:
+                self.use_legacy_sql = value
         else:
             self.use_legacy_sql = use_legacy_sql  # type: ignore[assignment]
 
@@ -495,11 +513,18 @@ class BigQueryHook(GoogleBaseHook, DbApiHook):
             Note that if `retry` is specified, the timeout applies to each individual attempt.
         """
         _table_resource: dict[str, Any] = {}
-        if isinstance(table_resource, Table):
-            _table_resource = Table.from_api_repr(table_resource)  # type: ignore
+        if isinstance(table_resource, (Table, TableReference, TableListItem)):
+            _table_resource = table_resource.to_api_repr()
+            if isinstance(table_resource, TableReference):
+                # A bare TableReference serializes to a flat dict without the
+                # "tableReference" wrapper expected by the API resource.
+                _table_resource = {"tableReference": _table_resource}
         if schema_fields:
             _table_resource["schema"] = {"fields": schema_fields}
-        table_resource_final = {**table_resource, **_table_resource}  # type: ignore
+        if isinstance(table_resource, dict):
+            table_resource_final = {**table_resource, **_table_resource}
+        else:
+            table_resource_final = _table_resource
         table_resource = self._resolve_table_reference(
             table_resource=table_resource_final,
             project_id=project_id,

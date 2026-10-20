@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
 
-from kubernetes.client import BatchV1Api, models as k8s
+from kubernetes.client import BatchV1Api, Configuration, models as k8s
 from kubernetes.client.api_client import ApiClient
 from kubernetes.client.rest import ApiException
 
@@ -238,7 +238,11 @@ class KubernetesJobOperator(KubernetesPodOperator):
                             pod=pod, container_name=self.base_container_name
                         )
                         self.pod_manager.await_xcom_sidecar_container_start(pod=pod)
-                        xcom_result.append(self.extract_xcom(pod=pod))
+                        # `wait_until_job_complete` below polls without a timeout, and the
+                        # Job can never reach a terminal state while the xcom sidecar is
+                        # still looping. So unlike KubernetesPodOperator, this path must
+                        # fail loudly when the sidecar cannot be killed rather than hang.
+                        xcom_result.append(self.extract_xcom(pod=pod, ignore_kill_failure=False))
                 self.job = self.hook.wait_until_job_complete(
                     job_name=self.job.metadata.name,
                     namespace=self.job.metadata.namespace,
@@ -378,7 +382,7 @@ class KubernetesJobOperator(KubernetesPodOperator):
             job = None
             log.warning("Template file %s does not exist", path)
 
-        api_client = ApiClient()
+        api_client = ApiClient(configuration=Configuration())
         return api_client._ApiClient__deserialize_model(job, k8s.V1Job)
 
     def on_kill(self) -> None:
@@ -662,6 +666,7 @@ class KubernetesDeleteJobOperator(BaseOperator):
         "name",
         "namespace",
         "cluster_context",
+        "kubernetes_conn_id",
     )
 
     def __init__(
@@ -767,6 +772,7 @@ class KubernetesPatchJobOperator(BaseOperator):
         "namespace",
         "body",
         "cluster_context",
+        "kubernetes_conn_id",
     )
 
     def __init__(

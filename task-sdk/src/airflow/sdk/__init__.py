@@ -26,11 +26,14 @@ __all__ = [
     "AssetAlias",
     "AssetAll",
     "AssetAny",
+    "AssetAndTimeSchedule",
     "AssetOrTimeSchedule",
+    "AssetTriggeredTimetable",
     "AssetWatcher",
     "AsyncCallback",
     "BaseAsyncOperator",
     "BaseBranchOperator",
+    "BaseDeadlineReference",
     "BaseHook",
     "BaseNotifier",
     "BaseOperator",
@@ -39,6 +42,7 @@ __all__ = [
     "BaseXCom",
     "BranchMixIn",
     "ChainMapper",
+    "ChainRetryPolicy",
     "Connection",
     "Context",
     "CronDataIntervalTimetable",
@@ -46,6 +50,7 @@ __all__ = [
     "CronPartitionTimetable",
     "DAG",
     "DagRunState",
+    "DayWindow",
     "DeadlineAlert",
     "DeadlineReference",
     "DeltaDataIntervalTimetable",
@@ -53,24 +58,33 @@ __all__ = [
     "EdgeModifier",
     "EventsTimetable",
     "ExceptionRetryPolicy",
+    "FanOutMapper",
+    "FixedKeyMapper",
+    "HourWindow",
     "IdentityMapper",
     "Label",
+    "LoopDecision",
     "Metadata",
-    "NEVER_EXPIRE",
+    "MinimumCount",
+    "MonthWindow",
     "MultipleCronTriggerTimetable",
+    "NEVER_EXPIRE",
     "ObjectStoragePath",
     "Param",
     "ParamsDict",
-    "PartitionAtRuntime",
+    "PartitionedAtRuntime",
     "PartitionedAssetTimetable",
     "PartitionMapper",
     "PokeReturnValue",
     "ProductMapper",
+    "QuarterWindow",
     "ResumableJobMixin",
     "RetryAction",
     "RetryDecision",
     "RetryPolicy",
     "RetryRule",
+    "RollupMapper",
+    "SegmentWindow",
     "SkipMixin",
     "SyncCallback",
     "StartOfDayMapper",
@@ -84,26 +98,32 @@ __all__ = [
     "TaskInstanceState",
     "TriggerRule",
     "Variable",
+    "WaitForAll",
+    "WeekWindow",
     "WeightRule",
+    "Window",
     "XComArg",
+    "YearWindow",
     "asset",
     "chain",
     "chain_linear",
     "conf",
     "cross_downstream",
     "dag",
+    "deadline_reference",
     "get_current_context",
     "get_parsing_context",
     "literal",
     "lineage",
     "macros",
+    "result",
     "setup",
     "task",
     "task_group",
     "teardown",
 ]
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 if TYPE_CHECKING:
     from airflow.sdk.api.datamodels._generated import DagRunState, TaskInstanceState, TriggerRule, WeightRule
@@ -118,7 +138,7 @@ if TYPE_CHECKING:
         cross_downstream,
     )
     from airflow.sdk.bases.operatorlink import BaseOperatorLink
-    from airflow.sdk.bases.resumablemixin import ResumableJobMixin
+    from airflow.sdk.bases.resumablejobmixin import ResumableJobMixin
     from airflow.sdk.bases.sensor import BaseSensorOperator, PokeReturnValue
     from airflow.sdk.bases.skipmixin import SkipMixin
     from airflow.sdk.bases.xcom import BaseXCom
@@ -137,17 +157,28 @@ if TYPE_CHECKING:
     from airflow.sdk.definitions.connection import Connection
     from airflow.sdk.definitions.context import Context, get_current_context, get_parsing_context
     from airflow.sdk.definitions.dag import DAG, dag
-    from airflow.sdk.definitions.deadline import DeadlineAlert, DeadlineReference
-    from airflow.sdk.definitions.decorators import setup, task, teardown
+    from airflow.sdk.definitions.deadline import (
+        BaseDeadlineReference,
+        DeadlineAlert,
+        DeadlineReference,
+        deadline_reference,
+    )
+    from airflow.sdk.definitions.decorators import result, setup, task, teardown
     from airflow.sdk.definitions.decorators.task_group import task_group
     from airflow.sdk.definitions.edges import EdgeModifier, Label
+    from airflow.sdk.definitions.loop import LoopDecision
     from airflow.sdk.definitions.param import Param, ParamsDict
     from airflow.sdk.definitions.partition_mappers.allowed_key import AllowedKeyMapper
-    from airflow.sdk.definitions.partition_mappers.base import PartitionMapper
+    from airflow.sdk.definitions.partition_mappers.base import (
+        PartitionMapper,
+        RollupMapper,
+    )
     from airflow.sdk.definitions.partition_mappers.chain import ChainMapper
+    from airflow.sdk.definitions.partition_mappers.fixed_key import FixedKeyMapper
     from airflow.sdk.definitions.partition_mappers.identity import IdentityMapper
     from airflow.sdk.definitions.partition_mappers.product import ProductMapper
     from airflow.sdk.definitions.partition_mappers.temporal import (
+        FanOutMapper,
         StartOfDayMapper,
         StartOfHourMapper,
         StartOfMonthMapper,
@@ -155,7 +186,22 @@ if TYPE_CHECKING:
         StartOfWeekMapper,
         StartOfYearMapper,
     )
+    from airflow.sdk.definitions.partition_mappers.wait_policy import (
+        MinimumCount,
+        WaitForAll,
+    )
+    from airflow.sdk.definitions.partition_mappers.window import (
+        DayWindow,
+        HourWindow,
+        MonthWindow,
+        QuarterWindow,
+        SegmentWindow,
+        WeekWindow,
+        Window,
+        YearWindow,
+    )
     from airflow.sdk.definitions.retry_policy import (
+        ChainRetryPolicy,
         ExceptionRetryPolicy,
         RetryAction,
         RetryDecision,
@@ -165,9 +211,11 @@ if TYPE_CHECKING:
     from airflow.sdk.definitions.taskgroup import TaskGroup
     from airflow.sdk.definitions.template import literal
     from airflow.sdk.definitions.timetables.assets import (
+        AssetAndTimeSchedule,
         AssetOrTimeSchedule,
-        PartitionAtRuntime,
+        AssetTriggeredTimetable,
         PartitionedAssetTimetable,
+        PartitionedAtRuntime,
     )
     from airflow.sdk.definitions.timetables.events import EventsTimetable
     from airflow.sdk.definitions.timetables.interval import (
@@ -195,12 +243,15 @@ __lazy_imports: dict[str, str] = {
     "AssetAccessControl": ".definitions.asset",
     "AssetAlias": ".definitions.asset",
     "AssetAll": ".definitions.asset",
+    "AssetAndTimeSchedule": ".definitions.timetables.assets",
     "AssetAny": ".definitions.asset",
     "AssetOrTimeSchedule": ".definitions.timetables.assets",
+    "AssetTriggeredTimetable": ".definitions.timetables.assets",
     "AssetWatcher": ".definitions.asset",
     "AsyncCallback": ".definitions.callback",
     "BaseAsyncOperator": ".bases.operator",
     "BaseBranchOperator": ".bases.branch",
+    "BaseDeadlineReference": ".definitions.deadline",
     "BaseHook": ".bases.hook",
     "BaseNotifier": ".bases.notifier",
     "BaseOperator": ".bases.operator",
@@ -209,6 +260,7 @@ __lazy_imports: dict[str, str] = {
     "BaseXCom": ".bases.xcom",
     "BranchMixIn": ".bases.branch",
     "ChainMapper": ".definitions.partition_mappers.chain",
+    "ChainRetryPolicy": ".definitions.retry_policy",
     "Connection": ".definitions.connection",
     "Context": ".definitions.context",
     "CronDataIntervalTimetable": ".definitions.timetables.interval",
@@ -216,6 +268,7 @@ __lazy_imports: dict[str, str] = {
     "CronPartitionTimetable": ".definitions.timetables.trigger",
     "DAG": ".definitions.dag",
     "DagRunState": ".api.datamodels._generated",
+    "DayWindow": ".definitions.partition_mappers.window",
     "DeadlineAlert": ".definitions.deadline",
     "DeadlineReference": ".definitions.deadline",
     "DeltaDataIntervalTimetable": ".definitions.timetables.interval",
@@ -223,24 +276,33 @@ __lazy_imports: dict[str, str] = {
     "EdgeModifier": ".definitions.edges",
     "EventsTimetable": ".definitions.timetables.events",
     "ExceptionRetryPolicy": ".definitions.retry_policy",
+    "FanOutMapper": ".definitions.partition_mappers.temporal",
+    "FixedKeyMapper": ".definitions.partition_mappers.fixed_key",
+    "HourWindow": ".definitions.partition_mappers.window",
     "IdentityMapper": ".definitions.partition_mappers.identity",
     "Label": ".definitions.edges",
+    "LoopDecision": ".definitions.loop",
     "Metadata": ".definitions.asset.metadata",
+    "MinimumCount": ".definitions.partition_mappers.wait_policy",
+    "MonthWindow": ".definitions.partition_mappers.window",
     "MultipleCronTriggerTimetable": ".definitions.timetables.trigger",
     "ObjectStoragePath": ".io.path",
     "Param": ".definitions.param",
     "ParamsDict": ".definitions.param",
-    "PartitionAtRuntime": ".definitions.timetables.assets",
+    "PartitionedAtRuntime": ".definitions.timetables.assets",
     "PartitionedAssetTimetable": ".definitions.timetables.assets",
     "PartitionMapper": ".definitions.partition_mappers.base",
     "PokeReturnValue": ".bases.sensor",
     "ProductMapper": ".definitions.partition_mappers.product",
-    "ResumableJobMixin": ".bases.resumablemixin",
+    "QuarterWindow": ".definitions.partition_mappers.window",
+    "ResumableJobMixin": ".bases.resumablejobmixin",
     "RetryAction": ".definitions.retry_policy",
     "RetryDecision": ".definitions.retry_policy",
     "RetryPolicy": ".definitions.retry_policy",
     "RetryRule": ".definitions.retry_policy",
+    "RollupMapper": ".definitions.partition_mappers.base",
     "SecretCache": ".execution_time.cache",
+    "SegmentWindow": ".definitions.partition_mappers.window",
     "SkipMixin": ".bases.skipmixin",
     "SyncCallback": ".definitions.callback",
     "StartOfDayMapper": ".definitions.partition_mappers.temporal",
@@ -254,20 +316,26 @@ __lazy_imports: dict[str, str] = {
     "TaskInstanceState": ".api.datamodels._generated",
     "TriggerRule": ".api.datamodels._generated",
     "Variable": ".definitions.variable",
+    "WaitForAll": ".definitions.partition_mappers.wait_policy",
+    "WeekWindow": ".definitions.partition_mappers.window",
     "WeightRule": ".api.datamodels._generated",
+    "Window": ".definitions.partition_mappers.window",
     "XComArg": ".definitions.xcom_arg",
+    "YearWindow": ".definitions.partition_mappers.window",
     "asset": ".definitions.asset.decorators",
     "chain": ".bases.operator",
     "chain_linear": ".bases.operator",
     "conf": ".configuration",
     "cross_downstream": ".bases.operator",
     "dag": ".definitions.dag",
+    "deadline_reference": ".definitions.deadline",
     "NEVER_EXPIRE": ".execution_time.context",
     "get_current_context": ".definitions.context",
     "get_parsing_context": ".definitions.context",
     "literal": ".definitions.template",
     "lineage": ".lineage",
     "macros": ".execution_time",
+    "result": ".definitions.decorators",
     "setup": ".definitions.decorators",
     "task": ".definitions.decorators",
     "task_group": ".definitions.decorators",

@@ -1,3 +1,4 @@
+
 .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -44,7 +45,7 @@ Login
 Password
     Specify the snowflake password. For public key authentication, the passphrase for the private key.
     For OAuth, the OAuth Client Secret. For Programmatic Access Token (PAT) authentication, specify
-    the PAT token value.
+    the PAT token value and set ``authenticator`` to ``programmatic_access_token``.
 
 Schema (optional)
     Specify the snowflake schema to be used.
@@ -58,12 +59,30 @@ Extra (optional)
     * ``region``: Warehouse region.
     * ``warehouse``: Snowflake warehouse name.
     * ``role``: Snowflake role.
-    * ``authenticator``: To connect using OAuth set this parameter ``oauth``. For Programmatic Access
-      Token (PAT) authentication, no special authenticator is required — simply set the PAT token as
-      the Password field. See `Snowflake PAT documentation <https://docs.snowflake.com/en/user-guide/programmatic-access-tokens>`_.
+    * ``authenticator``: To connect using OAuth set this parameter ``oauth``. To connect without a stored secret using
+      `Workload Identity Federation <https://docs.snowflake.com/en/user-guide/workload-identity-federation>`_,
+      set it to ``WORKLOAD_IDENTITY`` and also set ``workload_identity_provider`` (see below). For Programmatic Access
+      Token (PAT) authentication, set it to ``programmatic_access_token`` and put the PAT token in the
+      Password field. The same connection works for ``SnowflakeHook``, ``SnowflakeSqlApiHook``,
+      ``SnowflakeCortexAgentHook`` and the ``pydanticai_snowflake`` connection type. See `Snowflake PAT documentation <https://docs.snowflake.com/en/user-guide/programmatic-access-tokens>`_.
+    * ``workload_identity_provider``: The cloud whose workload identity is used as the Snowflake credential
+      when ``authenticator`` is ``WORKLOAD_IDENTITY``. One of ``AWS``, ``AZURE``, ``GCP`` or ``OIDC``. With
+      Workload Identity Federation no long-lived secret (password, key-pair or PAT) is stored; the workload's
+      cloud identity is the credential. Requires ``snowflake-connector-python>=3.17.0`` and the workload to
+      run on the matching cloud. ``AWS``, ``AZURE`` and ``GCP`` fetch the identity token from the cloud's
+      metadata service. ``OIDC`` instead requires the token to be supplied via ``token`` or ``token_file_path``
+      (see below); see `custom OIDC configuration
+      <https://docs.snowflake.com/en/user-guide/workload-identity-federation#label-wif-oidc-custom-configure-custom>`_.
+    * ``token``: The OIDC ID token (JWT) used when ``workload_identity_provider`` is ``OIDC``. Prefer
+      ``token_file_path`` for tokens that rotate.
+    * ``token_file_path``: Path to a file holding the OIDC ID token used when ``workload_identity_provider``
+      is ``OIDC``. The connector reads the token from this file, which suits projected or rotated tokens
+      (for example a Kubernetes service-account token).
     * ``token_endpoint``: Specify token endpoint for external OAuth provider.
-    * ``grant_type``: Specify grant type for OAuth authentication. Currently supported: ``refresh_token`` (default), ``client_credentials``.
+    * ``grant_type``: Specify grant type for OAuth authentication. Currently supported: ``refresh_token`` (default), ``client_credentials``, ``password`` (for external IdP token_endpoint only).
     * ``scope``: Specify OAuth scope to include in the access token request for any OAuth grant type.
+    * ``oauth_username``: Specify IdP resource owner user name which is used for OAuth to include in the access token request for password OAuth grant type.
+    * ``oauth_password``: Specify IdP resource owner user password which is used for OAuth to include in the access token request for password OAuth grant type.
     * ``refresh_token``: Specify refresh_token for OAuth connection.
     * ``azure_conn_id``: Azure Connection ID to be used for retrieving the OAuth token using Azure Entra authentication. Login and Password fields aren't required when using this method. Scope for the Azure OAuth token can be set in the config option ``azure_oauth_scope`` under the section ``[snowflake]``. Requires `apache-airflow-providers-microsoft-azure>=12.8.0`.
     * ``private_key_file``: Specify the path to the private key file.
@@ -123,7 +142,7 @@ JSON format example with Programmatic Access Token (PAT)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To authenticate using a `Programmatic Access Token <https://docs.snowflake.com/en/user-guide/programmatic-access-tokens>`_,
-set the PAT token as the password with no special authenticator required:
+set the PAT token as the password and set ``authenticator`` to ``programmatic_access_token``:
 
 .. code-block:: bash
 
@@ -132,9 +151,35 @@ set the PAT token as the password with no special authenticator required:
         "login": "user",
         "password": "<programmatic_access_token>",
         "extra": {
+            "authenticator": "programmatic_access_token",
             "account": "account",
             "database": "database",
             "warehouse": "snow-warehouse",
             "role": "role"
+        }
+    }'
+
+JSON format example with Workload Identity Federation (WIF)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+To authenticate without a stored secret using
+`Workload Identity Federation <https://docs.snowflake.com/en/user-guide/workload-identity-federation>`_,
+set ``authenticator`` to ``WORKLOAD_IDENTITY`` and ``workload_identity_provider`` to the cloud the
+workload runs on (here ``GCP``). No password, key-pair or token is stored; the workload's cloud identity
+is the credential. The Snowflake side needs a ``TYPE = SERVICE`` user that trusts the workload's identity
+and is granted a role with access to the target objects.
+
+.. code-block:: bash
+
+    export AIRFLOW_CONN_SNOWFLAKE_DEFAULT='{
+        "conn_type": "snowflake",
+        "login": "service-user",
+        "extra": {
+            "account": "account",
+            "database": "database",
+            "warehouse": "snow-warehouse",
+            "role": "role",
+            "authenticator": "WORKLOAD_IDENTITY",
+            "workload_identity_provider": "GCP"
         }
     }'

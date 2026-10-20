@@ -18,18 +18,21 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 import time
 from importlib import import_module
-from typing import TYPE_CHECKING, Annotated, BinaryIO, ClassVar, Protocol
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, ClassVar, Protocol
 from uuid import UUID
 
 import attrs
 import structlog
 from pydantic import Field, TypeAdapter
 
-from airflow.sdk._shared.module_loading import accepts_context, accepts_keyword_args
+from airflow.sdk._shared.module_loading import UNUSUAL_MODULE_PREFIX, accepts_context, accepts_keyword_args
 from airflow.sdk.exceptions import ErrorType
 from airflow.sdk.execution_time.comms import (
     ErrorResponse,
@@ -49,13 +52,15 @@ from airflow.sdk.execution_time.supervisor import (
     SOCKET_CLEANUP_TIMEOUT,
     WatchedSubprocess,
     _ensure_client,
+    _import_task_runner_before_fork,
     _make_process_nondumpable,
 )
 
 if TYPE_CHECKING:
+    from typing import Self
+
     from pydantic import BaseModel
     from structlog.typing import FilteringBoundLogger
-    from typing_extensions import Self
 
     from airflow.sdk.api.client import Client
 
@@ -64,6 +69,7 @@ if TYPE_CHECKING:
     class _BundleInfoLike(Protocol):
         name: str
         version: str | None
+        version_data: dict[str, Any] | None
 
 
 __all__ = ["CallbackSubprocess", "supervise_callback"]
@@ -80,10 +86,34 @@ CallbackToSupervisor = Annotated[
 ]
 
 
+SERDE_KWARGS_ENCODING = "serde"
+
+
+def decode_callback_kwargs(callback_kwargs: dict[str, Any], encoding: str | None) -> dict[str, Any]:
+    """
+    Decode the kwargs of a callback, right before the callback is called.
+
+    ``encoding`` is ``None`` for kwargs that are passed as they are (callbacks stored by
+    earlier versions), or ``"serde"`` for serde-encoded kwargs. ``context`` is added by the
+    scheduler and is never encoded.
+    """
+    if encoding is None:
+        return callback_kwargs
+    if encoding != SERDE_KWARGS_ENCODING:
+        raise ValueError(f"Unsupported callback kwargs encoding: {encoding!r}")
+
+    from airflow.sdk.serde import deserialize
+
+    return {key: value if key == "context" else deserialize(value) for key, value in callback_kwargs.items()}
+
+
 def execute_callback(
     callback_path: str,
     callback_kwargs: dict,
+    dag_rel_path: os.PathLike[str],
+    bundle_path: os.PathLike[str] | None,
     log,
+    callback_kwargs_encoding: str | None = None,
 ) -> tuple[bool, str | None]:
     """
     Execute a callback function by importing and calling it, returning the success state.
@@ -101,7 +131,10 @@ def execute_callback(
 
     :param callback_path: Dot-separated import path to the callback function or class.
     :param callback_kwargs: Keyword arguments to pass to the callback.
+    :param dag_rel_path: Relative path to the DAG file.
+    :param bundle_path: Path to the bundle file.
     :param log: Logger instance for recording execution.
+    :param callback_kwargs_encoding: How ``callback_kwargs`` is encoded, see :func:`decode_callback_kwargs`.
     :return: Tuple of (success: bool, error_message: str | None)
     """
     if not callback_path:
@@ -111,8 +144,25 @@ def execute_callback(
         # Import the callback callable
         # Expected format: "module.path.to.function_or_class"
         module_path, function_name = callback_path.rsplit(".", 1)
-        module = import_module(module_path)
+        # If the callback is defined within the Dag module, the module path is modified during DAG serialization.
+        # Attempt to import it using the path of the Dag file.
+        if module_path.startswith(UNUSUAL_MODULE_PREFIX):
+            if not dag_rel_path:
+                return False, "Dag relative path not found."
+            if not bundle_path:
+                return False, "Bundle path not found."
+            abs_path = Path(bundle_path) / Path(dag_rel_path)
+            spec = spec_from_file_location(module_path, abs_path)
+            if spec is None:
+                return False, f"Could not create module spec for {module_path}"
+            if spec.loader is None:
+                return False, f"Module spec has no loader for {module_path}"
+            module = module_from_spec(spec)
+            spec.loader.exec_module(module)
+        else:
+            module = import_module(module_path)
         callback_callable = getattr(module, function_name)
+        callback_kwargs = decode_callback_kwargs(callback_kwargs, callback_kwargs_encoding)
 
         log.debug("Executing callback", callback_path=callback_path, callback_kwargs=callback_kwargs)
 
@@ -175,6 +225,8 @@ class CallbackSubprocess(WatchedSubprocess):
         id: str,
         callback_path: str,
         callback_kwargs: dict,
+        callback_kwargs_encoding: str | None = None,
+        dag_rel_path: os.PathLike[str],
         bundle_info: _BundleInfoLike | None = None,
         client: Client,
         logger: FilteringBoundLogger | None = None,
@@ -191,6 +243,7 @@ class CallbackSubprocess(WatchedSubprocess):
 
             _log = structlog.get_logger(logger_name="callback_runner")
             task_runner.SUPERVISOR_COMMS = CommsDecoder[ToTask, CallbackToSupervisor](log=_log)
+            bundle_path = None
 
             # If bundle info is provided, initialize the bundle and ensure its path is importable.
             # This is needed for user-defined callbacks that live inside a DAG bundle rather than
@@ -202,6 +255,7 @@ class CallbackSubprocess(WatchedSubprocess):
                     bundle = DagBundlesManager().get_bundle(
                         name=bundle_info.name,
                         version=bundle_info.version,
+                        version_data=bundle_info.version_data,
                     )
                     bundle.initialize()
                     if (bundle_path := str(bundle.path)) not in sys.path:
@@ -216,11 +270,19 @@ class CallbackSubprocess(WatchedSubprocess):
                         exc_info=True,
                     )
 
-            success, error_msg = execute_callback(callback_path, callback_kwargs, _log)
+            success, error_msg = execute_callback(
+                callback_path=callback_path,
+                callback_kwargs=callback_kwargs,
+                dag_rel_path=dag_rel_path,
+                bundle_path=bundle_path,
+                log=_log,
+                callback_kwargs_encoding=callback_kwargs_encoding,
+            )
             if not success:
                 _log.error("Callback failed", error=error_msg)
                 sys.exit(1)
 
+        _import_task_runner_before_fork()
         return super().start(
             id=UUID(id) if not isinstance(id, UUID) else id,
             client=client,
@@ -233,8 +295,8 @@ class CallbackSubprocess(WatchedSubprocess):
         """
         Wait for the callback subprocess to complete.
 
-        Mirrors the structure of ActivitySubprocess.wait() but without heartbeating,
-        task API state management, or log uploading.
+        Mirrors the structure of ActivitySubprocess.wait() but without heartbeating
+        or task API state management.
         """
         if self._exit_code is not None:
             return self._exit_code
@@ -245,6 +307,9 @@ class CallbackSubprocess(WatchedSubprocess):
             self.selector.close()
 
         self._exit_code = self._exit_code if self._exit_code is not None else 1
+
+        self._upload_logs()
+
         return self._exit_code
 
     def _get_callback_execution_timeout(self) -> int:
@@ -252,6 +317,18 @@ class CallbackSubprocess(WatchedSubprocess):
         from airflow.sdk.configuration import conf
 
         return conf.getint("callbacks", "callback_execution_timeout", fallback=0)
+
+    def _upload_logs(self):
+        from airflow.sdk.execution_time.supervisor import _remote_logging_conn
+        from airflow.sdk.log import upload_to_remote
+
+        try:
+            with _remote_logging_conn(self.client):
+                upload_to_remote(self.process_log)
+        except Exception:
+            log.exception(
+                "Failed to upload callback logs to remote storage", callback_id=self.id, pid=self.pid
+            )
 
     def _monitor_subprocess(self):
         """
@@ -331,14 +408,16 @@ class CallbackSubprocess(WatchedSubprocess):
         self.send_msg(resp, request_id=req_id, error=None, **dump_opts)
 
 
-def _configure_logging(log_path: str) -> tuple[FilteringBoundLogger, BinaryIO]:
+def _configure_logging(log_path: str, client: Client) -> tuple[FilteringBoundLogger, BinaryIO]:
     """Configure file-based logging for the callback subprocess."""
+    from airflow.sdk.execution_time.supervisor import _remote_logging_conn
     from airflow.sdk.log import init_log_file, logging_processors
 
     log_file = init_log_file(log_path)
     log_file_descriptor: BinaryIO = log_file.open("ab")
     underlying_logger = structlog.BytesLogger(log_file_descriptor)
-    processors = logging_processors(json_output=True)
+    with _remote_logging_conn(client):
+        processors = logging_processors(json_output=True)
     logger = structlog.wrap_logger(underlying_logger, processors=processors, logger_name="callback").bind()
 
     return logger, log_file_descriptor
@@ -349,6 +428,8 @@ def supervise_callback(
     id: str,
     callback_path: str,
     callback_kwargs: dict,
+    dag_rel_path: os.PathLike[str],
+    callback_kwargs_encoding: str | None = None,
     log_path: str | None = None,
     bundle_info: _BundleInfoLike | None = None,
     token: str = "",
@@ -361,6 +442,8 @@ def supervise_callback(
     :param id: Unique identifier for this callback execution.
     :param callback_path: Dot-separated import path to the callback function or class.
     :param callback_kwargs: Keyword arguments to pass to the callback.
+    :param dag_rel_path: Relative path to the DAG file.
+    :param callback_kwargs_encoding: How ``callback_kwargs`` is encoded, see :func:`decode_callback_kwargs`.
     :param log_path: Path to write logs, if required.
     :param bundle_info: When provided, the bundle's path is added to sys.path so callbacks in Dag Bundles are importable.
     :param token: Authentication token for the API client.
@@ -374,19 +457,23 @@ def supervise_callback(
 
     logger: FilteringBoundLogger
     log_file_descriptor: BinaryIO | None = None
-    if log_path:
-        logger, log_file_descriptor = _configure_logging(log_path)
-    else:
-        # When no log file is requested, still use a callback-specific logger
-        # so logs are clearly separated from task logs.
-        logger = structlog.get_logger(logger_name="callback").bind()
 
     with _ensure_client(server, token, client=client) as client:
+        if log_path:
+            logger, log_file_descriptor = _configure_logging(log_path, client)
+        else:
+            logger = structlog.get_logger(logger_name="callback").bind()
+
+        # Swap the single-use callback token for an execution token before any context read.
+        client.callbacks.run(UUID(id))
+
         try:
             process = CallbackSubprocess.start(
                 id=id,
                 callback_path=callback_path,
                 callback_kwargs=callback_kwargs,
+                callback_kwargs_encoding=callback_kwargs_encoding,
+                dag_rel_path=dag_rel_path,
                 bundle_info=bundle_info,
                 client=client,
                 logger=logger,

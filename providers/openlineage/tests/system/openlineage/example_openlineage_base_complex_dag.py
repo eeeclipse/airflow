@@ -45,6 +45,7 @@ try:
 except ImportError:
     from airflow.utils.task_group import TaskGroup  # type: ignore[no-redef]
 
+from system.openlineage.constants import DEFAULT_DAGRUN_TIMEOUT
 from system.openlineage.expected_events import AIRFLOW_VERSION, get_expected_event_file_path
 from system.openlineage.operator import OpenLineageTestOperator
 
@@ -74,6 +75,7 @@ class CustomMappedOperator(BaseOperator):
 DAG_ID = "openlineage_base_complex_dag"
 
 with DAG(
+    dagrun_timeout=DEFAULT_DAGRUN_TIMEOUT,
     dag_id=DAG_ID,
     start_date=datetime(2021, 1, 1),
     schedule=None,
@@ -95,7 +97,13 @@ with DAG(
     task_2 = PythonOperator(
         task_id="task_2",
         python_callable=do_nothing,
-        inlets=[Asset(uri="file://host1/dir2/file2.txt"), Asset(uri="unknown_scheme://host1/dir2/file3.txt")],
+        inlets=[
+            Asset(
+                uri="file://host1/dir2/file2.txt",
+                extra={"etag": '"0x8D0000000000001"', "owner": "O'Brien", "has_header": True, "note": None},
+            ),
+            Asset(uri="unknown_scheme://host1/dir2/file3.txt"),
+        ],
         max_retry_delay=42,
         doc="text doc",
         doc_md="should be skipped",
@@ -105,7 +113,12 @@ with DAG(
     )
     task_3 = EmptyOperator(
         task_id="task_3",
-        outlets=[Asset(uri="file://host/dir/file.txt")],
+        outlets=[
+            Asset(
+                uri="file://host/dir/file.txt",
+                extra={"checks": [{"passed": True}], "ratio": 0.5},
+            )
+        ],
         doc_md="MD doc",
         doc_json="should be skipped",
         doc_yaml="should be skipped",

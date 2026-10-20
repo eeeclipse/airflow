@@ -16,32 +16,43 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { HStack, Text, Box } from "@chakra-ui/react";
-import { useState } from "react";
+import { Box, HStack, Text } from "@chakra-ui/react";
 import { useTranslation } from "react-i18next";
 import { FiBarChart } from "react-icons/fi";
+import { useNavigate } from "react-router-dom";
 
 import { useDeadlinesServiceGetDagDeadlineAlerts } from "openapi/queries";
 import type { DAGRunResponse } from "openapi/requests/types.gen";
+
+import { RouterLink } from "src/system-components";
+
+import DeleteRunButton from "src/pages/DagRuns/DeleteRunButton";
+
 import { ClearRunButton } from "src/components/Clear";
 import { DagVersion } from "src/components/DagVersion";
-import EditableMarkdownButton from "src/components/EditableMarkdownButton";
 import { HeaderCard } from "src/components/HeaderCard";
 import { LimitedItemsList } from "src/components/LimitedItemsList";
 import { MarkRunAsButton } from "src/components/MarkAs";
+import { NeedsReviewButtonWithModal } from "src/components/NeedsReviewButton";
+import { NotePreview } from "src/components/NotePreview";
+import RenderedJsonField from "src/components/RenderedJsonField";
 import { RunTypeIcon } from "src/components/RunTypeIcon";
+import { TeamName } from "src/components/TeamName";
 import Time from "src/components/Time";
-import { RouterLink } from "src/components/ui";
+
 import { SearchParamsKeys } from "src/constants/searchParams";
-import DeleteRunButton from "src/pages/DagRuns/DeleteRunButton";
-import { usePatchDagRun } from "src/queries/usePatchDagRun";
-import { getDuration } from "src/utils";
+import { useShowTeam } from "src/hooks/useShowTeam";
+import { useDagRunNote } from "src/queries/useDagRunNote";
+import { hasDagRunConfig, useDurationFormat } from "src/utils";
 
 import { DeadlineStatus } from "./DeadlineStatus";
 
 export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
   const { t: translate } = useTranslation();
-  const [note, setNote] = useState<string | null>(dagRun.note);
+  const { formatElapsed } = useDurationFormat();
+  const { isPending, note, onOpen, onSave, setNote } = useDagRunNote(dagRun);
+  const showTeam = useShowTeam(dagRun.team_name);
+  const navigate = useNavigate();
 
   const dagId = dagRun.dag_id;
   const dagRunId = dagRun.dag_run_id;
@@ -49,42 +60,15 @@ export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
   const { data: alertData } = useDeadlinesServiceGetDagDeadlineAlerts({ dagId });
   const hasDeadlineAlerts = (alertData?.total_entries ?? 0) > 0;
 
-  const { isPending, mutate } = usePatchDagRun({
-    dagId,
-    dagRunId,
-  });
-
-  const onConfirm = () => {
-    if (note !== dagRun.note) {
-      mutate({
-        dagId,
-        dagRunId,
-        requestBody: { note },
-      });
-    }
-  };
-
-  const onOpen = () => {
-    setNote(dagRun.note ?? "");
-  };
-
   return (
-    <Box>
+    <Box display="flex" flexDirection="column" gap={2}>
       <HeaderCard
         actions={
           <>
-            <EditableMarkdownButton
-              header={translate("note.dagRun")}
-              isPending={isPending}
-              mdContent={dagRun.note}
-              onConfirm={onConfirm}
-              onOpen={onOpen}
-              placeholder={translate("note.placeholder")}
-              setMdContent={setNote}
-            />
-            <ClearRunButton dagRun={dagRun} isHotkeyEnabled />
-            <MarkRunAsButton dagRun={dagRun} isHotkeyEnabled />
-            <DeleteRunButton dagRun={dagRun} />
+            <NeedsReviewButtonWithModal dagId={dagId} runId={dagRunId} variant="chip" />
+            <ClearRunButton bg="bg" dagRun={dagRun} isHotkeyEnabled variant="outline" />
+            <MarkRunAsButton bg="bg" dagRun={dagRun} isHotkeyEnabled variant="outline" />
+            <DeleteRunButton bg="bg" dagRun={dagRun} variant="outline" />
           </>
         }
         icon={<FiBarChart />}
@@ -102,7 +86,7 @@ export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
             ? []
             : [
                 {
-                  label: translate("dagRun.mappedPartitionKey"),
+                  label: translate("dagRun.partitionKey"),
                   value: dagRun.partition_key,
                 },
               ]),
@@ -117,7 +101,7 @@ export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
           },
           { label: translate("startDate"), value: <Time datetime={dagRun.start_date} /> },
           { label: translate("endDate"), value: <Time datetime={dagRun.end_date} /> },
-          { label: translate("duration"), value: getDuration(dagRun.start_date, dagRun.end_date) },
+          { label: translate("duration"), value: formatElapsed(dagRun.start_date, dagRun.end_date) },
           ...(dagRun.triggering_user_name === null
             ? []
             : [
@@ -132,6 +116,14 @@ export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
                   ),
                 },
               ]),
+          ...(showTeam
+            ? [
+                {
+                  label: translate("dagDetails.team"),
+                  value: <TeamName teamName={dagRun.team_name} />,
+                },
+              ]
+            : []),
           {
             label: translate("dagRun.dagVersions"),
             value: (
@@ -143,6 +135,20 @@ export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
               />
             ),
           },
+          ...(hasDagRunConfig(dagRun.conf)
+            ? [
+                {
+                  label: translate("dagRun.conf"),
+                  value: (
+                    <RenderedJsonField
+                      collapsed
+                      content={dagRun.conf}
+                      onExpand={() => void navigate("details")}
+                    />
+                  ),
+                },
+              ]
+            : []),
           ...(hasDeadlineAlerts
             ? [
                 {
@@ -153,6 +159,15 @@ export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
             : []),
         ]}
         title={dagRun.dag_run_id}
+        type="dagRun"
+      />
+      <NotePreview
+        header={translate("note.dagRun")}
+        isPending={isPending}
+        note={note}
+        onOpen={onOpen}
+        onSave={onSave}
+        setNote={setNote}
       />
     </Box>
   );

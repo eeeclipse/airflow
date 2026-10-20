@@ -17,8 +17,8 @@
 
 .. _howto/hook:pydantic_ai:
 
-PydanticAIHook
-==============
+Using the hook directly: ``PydanticAIHook``
+===========================================
 
 Use :class:`~airflow.providers.common.ai.hooks.pydantic_ai.PydanticAIHook` to interact
 with LLM providers via `pydantic-ai <https://ai.pydantic.dev/>`__.
@@ -29,7 +29,7 @@ The hook manages API credentials from an Airflow connection and creates pydantic
 .. seealso::
     :ref:`Connection configuration <howto/connection:pydanticai>`
 
-Basic Usage
+Basic usage
 -----------
 
 Use the hook in a ``@task`` function to call an LLM:
@@ -39,14 +39,15 @@ Use the hook in a ``@task`` function to call an LLM:
     :start-after: [START howto_hook_pydantic_ai_basic]
     :end-before: [END howto_hook_pydantic_ai_basic]
 
-Overriding the Model
+Overriding the model
 --------------------
 
 The model can be specified at three levels (highest priority first):
 
 1. ``model_id`` parameter on the hook
 2. ``model`` key in the connection's extra JSON
-3. (No default — raises an error if neither is set)
+3. With ``create_agent(spec_file=...)``, the spec file's ``model``. Otherwise there is
+   no default and the hook raises.
 
 .. code-block:: python
 
@@ -54,9 +55,9 @@ The model can be specified at three levels (highest priority first):
     hook = PydanticAIHook(llm_conn_id="my_llm")
 
     # Override with a specific model
-    hook = PydanticAIHook(llm_conn_id="my_llm", model_id="anthropic:claude-opus-4-6")
+    hook = PydanticAIHook(llm_conn_id="my_llm", model_id="anthropic:claude-sonnet-5")
 
-Structured Output
+Structured output
 -----------------
 
 Pydantic-ai's structured output works naturally through the hook.
@@ -66,3 +67,33 @@ Define a Pydantic model for the expected output shape, then pass it as ``output_
     :language: python
     :start-after: [START howto_hook_pydantic_ai_structured_output]
     :end-before: [END howto_hook_pydantic_ai_structured_output]
+
+Loading agent config from a spec file
+-------------------------------------
+
+Instead of hard-coding model name, instructions, and settings in Python, you can
+store them in a YAML or JSON `AgentSpec
+<https://ai.pydantic.dev/agents/#agent-spec>`__ file and pass its path via
+``spec_file``.  This keeps prompt engineering separate from Dag logic and lets
+you version-control agent configs independently.
+
+.. code-block:: yaml
+   :caption: agent_spec.yaml
+
+   model: openai:gpt-5-mini
+   instructions: >
+     You are a concise summarizer. Given any text, respond with a single
+     paragraph that captures the key points.
+   model_settings:
+     temperature: 0.3
+   retries: 2
+
+.. exampleinclude:: /../../ai/src/airflow/providers/common/ai/example_dags/example_pydantic_ai_hook.py
+    :language: python
+    :start-after: [START howto_hook_pydantic_ai_spec_file]
+    :end-before: [END howto_hook_pydantic_ai_spec_file]
+
+The spec file's ``model`` is the last resort: ``model_id`` and the connection's
+``model`` extra both take precedence over it, in the
+:ref:`order the connection page lists <pydanticai-model-resolution>`. Passing
+``instructions`` to ``create_agent`` when a ``spec_file`` is also given appends additional instructions to the file value.

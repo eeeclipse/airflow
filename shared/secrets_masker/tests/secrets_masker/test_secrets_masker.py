@@ -675,9 +675,14 @@ class TestSecretsMasker:
             (["abcdef"], ["***"], 1),
             ([[[["abcdef"]]]], [[[["***"]]]], None),
             ([[[[["abcdef"]]]]], [[[[["***"]]]]], None),
-            # Items below max depth aren't redacted
-            ([[[[[["abcdef"]]]]]], [[[[[["abcdef"]]]]]], None),
-            ([["abcdef"]], [["abcdef"]], 1),
+            # Registered secrets are redacted at any depth, whatever max_depth says
+            ([[[[[["abcdef"]]]]]], [[[[[["***"]]]]]], None),
+            ([["abcdef"]], [["***"]], 1),
+            (
+                {"a": {"b": {"c": {"d": {"e": {"f": {"g": "prefix-abcdef-suffix"}}}}}}},
+                {"a": {"b": {"c": {"d": {"e": {"f": {"g": "prefix-***-suffix"}}}}}}},
+                None,
+            ),
         ],
     )
     def test_redact_max_depth(self, val, expected, max_depth):
@@ -717,6 +722,20 @@ class TestSecretsMasker:
             (
                 {"a": {"b": {"c": {"d": {"e": {"api_key": "leaked"}}}}}},
                 {"a": {"b": {"c": {"d": {"e": {"api_key": "***"}}}}}},
+            ),
+            # A sensitive key wrapped in a list beyond MAX_RECURSION_DEPTH is
+            # still redacted: the list is walked unconditionally, mirroring the
+            # unbounded dict walk above. Here the list sits at depth 6 (one past
+            # the cutoff), reached through the unbounded dict chain a..f.
+            (
+                {"a": {"b": {"c": {"d": {"e": {"f": [{"password": "leaked"}]}}}}}},
+                {"a": {"b": {"c": {"d": {"e": {"f": [{"password": "***"}]}}}}}},
+            ),
+            # Same for a tuple-wrapped sensitive key past MAX_RECURSION_DEPTH
+            # (a set cannot hold a dict, so only list/tuple are exercised here).
+            (
+                {"a": {"b": {"c": {"d": {"e": {"f": ({"token": "leaked"},)}}}}}},
+                {"a": {"b": {"c": {"d": {"e": {"f": ({"token": "***"},)}}}}}},
             ),
         ],
     )
@@ -818,9 +837,10 @@ class TestShouldHideValueForKey:
             ("GOOGLE_APIKEY", True),
             (1, False),
             # webhook_url / bearer / dsn / auth_header / service_key in DEFAULT_SENSITIVE_FIELDS.
-            # Matching is case-insensitive substring on the lowercased key, so
+            # Matching is case-insensitive substring on the normalised key, so
             # snake_case variants (and underscore-bearing prefixes/suffixes) are
-            # covered; PascalCase / camelCase variants without underscores are not.
+            # covered; camelCase / PascalCase keys are split on word boundaries
+            # first (see the camelCase cases below).
             ("webhook_url", True),
             ("WEBHOOK_URL", True),
             ("slack_webhook_url", True),
@@ -834,6 +854,39 @@ class TestShouldHideValueForKey:
             ("custom_auth_header", True),
             ("service_key", True),
             ("my_service_key", True),
+            ("spark.hadoop.fs.s3a.bucket.spark.access.key", True),
+            ("spark.hadoop.fs.s3a.bucket.spark.secret.key", True),
+            ("spark.sql.catalog.kometa.token", True),
+            ("my-access-key", True),
+            ("auth.example.com/token", True),
+            ("spark.executor.memory", False),
+            ("spark.driver.cores", False),
+            # camelCase / PascalCase keys matching multi-word default fields.
+            ("privateKey", True),
+            ("PrivateKey", True),
+            ("privateKEY", True),
+            ("sshPrivateKey", True),
+            ("connectionString", True),
+            ("webhookUrl", True),
+            ("webhookURL", True),
+            ("slackWebhookUrl", True),
+            ("accessKey", True),
+            ("accessKeyId", True),
+            ("authHeader", True),
+            ("keyfileDict", True),
+            ("serviceAccount", True),
+            ("serviceAccountName", True),
+            ("serviceKey", True),
+            ("apiKey", True),
+            ("APIKey", True),
+            ("accessToken", True),
+            ("oauth2Token", True),
+            ("proxyPassword", True),
+            # camelCase keys that do not contain a sensitive field stay visible.
+            ("primaryKey", False),
+            ("connectionTimeout", False),
+            ("serviceName", False),
+            ("webhookName", False),
         ],
     )
     def test_hiding_defaults(self, key, expected_result):
@@ -849,6 +902,9 @@ class TestShouldHideValueForKey:
             ("key", "GITHUB_APIKEY", True),
             ("key, token", "TRELLO_TOKEN", True),
             ("mysecretword, mysensitivekey", "GITHUB_mysecretword", True),
+            ("mysensitivekey", "mySensitiveKey", True),
+            ("my_sensitive_key", "mySensitiveKey", True),
+            ("my_sensitive_key", "MySensitiveKey", True),
             (None, "TRELLO_API", False),
             ("token", "TRELLO_KEY", False),
             ("token, mysecretword", "TRELLO_KEY", False),
@@ -916,6 +972,12 @@ class TestRedactedIO:
         RedactedIO().write(PASSWORD)
         stdout = capsys.readouterr().out
         assert stdout == "***"
+
+    def test_writelines(self, capsys):
+        RedactedIO().writelines([f"{PASSWORD}\n", f"and {PASSWORD}\n"])
+        stdout = capsys.readouterr().out
+        assert stdout == "***\nand ***\n"
+        assert PASSWORD not in stdout
 
     def test_input_builtin(self, monkeypatch):
         """
@@ -1218,6 +1280,21 @@ class TestMixedDataScenarios:
             assert "***" in redacted_data["description"]
             assert redacted_data["nested"]["token"] == "***"
             assert redacted_data["nested"]["info"] == "No secrets here"
+
+    def test_nested_camel_case_keys(self):
+        secrets_masker = SecretsMasker()
+        configure_secrets_masker_for_test(secrets_masker)
+
+        data = {"connection": {"privateKey": "pk", "connectionString": "cs", "serviceName": "svc"}}
+
+        with patch(
+            "airflow_shared.secrets_masker.secrets_masker._secrets_masker", return_value=secrets_masker
+        ):
+            redacted_data = redact(data)
+
+        assert redacted_data == {
+            "connection": {"privateKey": "***", "connectionString": "***", "serviceName": "svc"}
+        }
 
 
 class TestSecretsMaskerMerge:

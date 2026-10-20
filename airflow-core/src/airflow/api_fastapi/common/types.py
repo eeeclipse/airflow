@@ -120,6 +120,8 @@ class MenuItem(Enum):
     CONFIG = "Config"
     CONNECTIONS = "Connections"
     DAGS = "Dags"
+    DAG_BUNDLES = "Dag Bundles"
+    DEADLINES = "Deadlines"
     DOCS = "Docs"
     JOBS = "Jobs"
     PLUGINS = "Plugins"

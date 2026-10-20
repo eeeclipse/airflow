@@ -29,6 +29,11 @@ experienced users alike.
 .. note::
    Screenshots in this guide use **dark theme** by default. Select views are also shown in **light theme** for comparison. You can toggle themes from user settings located at the bottom corner of the Airflow UI.
 
+.. note::
+   The Airflow 3 UI uses modern browser and CSS features. Use a current version of Chrome, Edge, Firefox, or
+   Safari. Older browser versions that do not support modern CSS color functions such as ``oklch()`` or
+   ``color-mix()`` may render the UI incorrectly.
+
 .. _ui-home:
 
 Home Page
@@ -477,12 +482,12 @@ The Asset List shows all known assets, grouped by name. For each asset, you can 
 Hovering over a count of Dags or tasks shows a tooltip with the full list of producers or consumers.
 
 .. image:: img/ui-dark/asset_list_consuming_dags.png
-  :alt: Asset Graph View (dark mode)
+  :alt: Asset List (dark mode)
 
 |
 
 .. image:: img/ui-light/asset_list_consuming_dags.png
-  :alt: Asset Graph View (light mode)
+  :alt: Asset List (light mode)
 
 Clicking on the link takes you to the Asset Graph View.
 

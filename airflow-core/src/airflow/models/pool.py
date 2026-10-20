@@ -122,6 +122,10 @@ class Pool(Base):
         return Pool.get_pool(Pool.DEFAULT_POOL_NAME, session=session)
 
     @staticmethod
+    def get_default_team_pool_name(team_name: str) -> str:
+        return f"default_pool_{team_name}"
+
+    @staticmethod
     @provide_session
     def create_or_update_pool(
         name: str,
@@ -129,20 +133,35 @@ class Pool(Base):
         description: str,
         include_deferred: bool,
         *,
+        team_name: str | None = None,
         session: Session = NEW_SESSION,
     ) -> Pool:
         """Create a pool with given parameters or update it if it already exists."""
+        from airflow.configuration import conf
+
         if not name:
             raise ValueError("Pool name must not be empty")
 
+        if team_name and not conf.getboolean("core", "multi_team"):
+            raise ValueError(
+                "team_name cannot be set when multi_team mode is disabled. Please contact your administrator."
+            )
+
         pool = session.scalar(select(Pool).filter_by(pool=name))
         if pool is None:
-            pool = Pool(pool=name, slots=slots, description=description, include_deferred=include_deferred)
+            pool = Pool(
+                pool=name,
+                slots=slots,
+                description=description,
+                include_deferred=include_deferred,
+                team_name=team_name,
+            )
             session.add(pool)
         else:
             pool.slots = slots
             pool.description = description
             pool.include_deferred = include_deferred
+            pool.team_name = team_name
 
         return pool
 
@@ -348,7 +367,8 @@ class Pool(Base):
         return int(
             session.scalar(
                 select(func.sum(TaskInstance.pool_slots)).where(
-                    TaskInstance.pool == self.pool, TaskInstance.state == TaskInstanceState.DEFERRED
+                    TaskInstance.pool == self.pool,
+                    TaskInstance.state == TaskInstanceState.DEFERRED,
                 )
             )
             or 0
@@ -378,4 +398,4 @@ class Pool(Base):
         pool_names: list[str], *, session: Session = NEW_SESSION
     ) -> dict[str, str | None]:
         stmt = select(Pool.pool, Pool.team_name).where(Pool.pool.in_(pool_names))
-        return {pool: team_name for pool, team_name in session.execute(stmt)}
+        return {pool: team_name for pool, team_name in session.execute(stmt) if pool is not None}

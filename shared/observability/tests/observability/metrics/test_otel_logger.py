@@ -24,11 +24,16 @@ import time
 from unittest import mock
 
 import pytest
+from opentelemetry import metrics
 from opentelemetry.metrics import MeterProvider
-from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation, View
+from opentelemetry.sdk.metrics import MeterProvider as SDKMeterProvider
+from opentelemetry.sdk.metrics.view import (
+    ExplicitBucketHistogramAggregation,
+    ExponentialBucketHistogramAggregation,
+    View,
+)
 
 from airflow_shared.observability.common import get_otel_data_exporter
-from airflow_shared.observability.exceptions import InvalidStatsNameException
 from airflow_shared.observability.metrics.otel_logger import (
     OTEL_NAME_MAX_LENGTH,
     UP_DOWN_COUNTERS,
@@ -62,6 +67,26 @@ def name():
     return "test_stats_run"
 
 
+@pytest.fixture
+def reset_meter_provider():
+    """Let a test install its own global MeterProvider, then restore the previous one.
+
+    ``set_meter_provider`` is guarded by a process-wide ``Once``, so tests that install a
+    provider have to clear it the same way ``get_otel_logger`` does after a fork.
+    """
+    import opentelemetry.metrics._internal as metrics_internal
+
+    def clear() -> None:
+        metrics_internal._METER_PROVIDER_SET_ONCE._done = False
+        metrics_internal._METER_PROVIDER = None
+
+    previous = metrics_internal._METER_PROVIDER
+    clear()
+    yield
+    clear()
+    metrics_internal._METER_PROVIDER = previous
+
+
 class TestOtelMetrics:
     def setup_method(self):
         self.meter = mock.Mock(MeterProvider)
@@ -78,9 +103,9 @@ class TestOtelMetrics:
         assert not _is_up_down_counter("this_is_not_a_udc")
 
     def test_exemption_list_has_not_grown(self):
-        assert len(BACK_COMPAT_METRIC_NAMES) <= 26, (
+        assert len(BACK_COMPAT_METRIC_NAMES) <= 25, (
             "This test exists solely to ensure that nobody is adding names to the exemption list. "
-            "There are 26 names which are potentially too long for OTel and that number should "
+            "There are 25 names which are potentially too long for OTel and that number should "
             "only ever go down as these names are deprecated.  If this test is failing, please "
             "adjust your new stat's name; do not add as exemption without a very good reason."
         )
@@ -98,15 +123,54 @@ class TestOtelMetrics:
             ],
         ],
     )
-    def test_invalid_stat_names_are_caught(self, invalid_stat_combo):
+    def test_invalid_stat_names_are_skipped(self, invalid_stat_combo):
         prefix = invalid_stat_combo[0]
         name = invalid_stat_combo[1]
         self.stats.prefix = prefix
 
-        with pytest.raises(InvalidStatsNameException):
-            self.stats.incr(name)
+        result = self.stats.incr(name)
 
-        self.meter.assert_not_called()
+        assert result is None
+        self.meter.get_meter().create_counter.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "stat",
+        [
+            "dag.my_dag.preço_task.scheduled_duration",
+            "dag.my_dag.tâche_principale.duration",
+            "dag.my_dag.aufgäbe.duration",
+        ],
+    )
+    def test_non_ascii_stat_names_are_skipped_without_raising(self, stat):
+        result = self.stats.incr(stat)
+
+        assert result is None
+        self.meter.get_meter().create_counter.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "stat",
+        [
+            "dag_processing.last_run.seconds_ago.PBI_SKU_Performance copy",  # space in filename
+            "dag_processing.last_run.seconds_ago.mein_däg_file",  # non-ASCII in filename
+        ],
+    )
+    def test_gauge_with_invalid_stat_names_skipped_without_raising(self, stat):
+        self.stats.gauge(stat, value=1)
+
+        self.meter.get_meter().create_gauge.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "stat",
+        [
+            "dag.my_dag.preço_task.duration",  # non-ASCII
+            "dag.my_dag.task copy.duration",  # space
+        ],
+    )
+    def test_timer_with_invalid_stat_name_does_not_record(self, stat):
+        with self.stats.timer(stat):
+            pass
+
+        self.meter.get_meter().create_histogram.assert_not_called()
 
     def test_old_name_exception_works(self, caplog):
         name = "task_instance_created_OperatorNameWhichIsSuperLongAndExceedsTheOpenTelemetryCharacterLimit/task_instance_created_OperatorNameWhichIsSuperLongAndExceedsTheOpenTelemetryCharacterLimit/task_instance_created_OperatorNameWhichIsSuperLongAndExceedsTheOpenTelemetryCharacterLimit"
@@ -463,6 +527,37 @@ class TestOtelMetrics:
         view = views[0]
         assert isinstance(view, View)
         assert isinstance(view._aggregation, ExponentialBucketHistogramAggregation)
+
+    def test_declaratively_configured_provider_is_not_replaced(self, reset_meter_provider):
+        """A MeterProvider built from OTEL_CONFIG_FILE must survive get_otel_logger().
+
+        The declarative configuration spec makes that file the sole source of SDK
+        construction, so replacing its provider silently drops the deployment's views.
+        See https://github.com/apache/airflow/issues/64690 for why the provider is
+        otherwise force-replaced.
+        """
+        declarative_view = View(
+            instrument_name="*_duration",
+            aggregation=ExplicitBucketHistogramAggregation(boundaries=(0.5, 1, 2, 4, 8)),
+        )
+        configured_provider = SDKMeterProvider(views=[declarative_view], shutdown_on_exit=False)
+        metrics.set_meter_provider(configured_provider)
+
+        with env_vars({"OTEL_CONFIG_FILE": "/tmp/otel-config.yaml"}):
+            logger = get_otel_logger(host="localhost", port=4318)
+
+        assert logger.otel is configured_provider
+        assert metrics.get_meter_provider() is configured_provider
+        assert list(configured_provider._sdk_config.views) == [declarative_view]
+
+    def test_provider_is_replaced_without_declarative_config(self, reset_meter_provider):
+        """Without OTEL_CONFIG_FILE, Airflow still installs its own provider."""
+        pre_existing = SDKMeterProvider(shutdown_on_exit=False)
+        metrics.set_meter_provider(pre_existing)
+
+        logger = get_otel_logger(host="localhost", port=4318)
+
+        assert logger.otel is not pre_existing
 
     def test_atexit_flush_on_process_exit(self):
         """

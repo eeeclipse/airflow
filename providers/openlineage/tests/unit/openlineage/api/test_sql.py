@@ -16,7 +16,7 @@
 # under the License.
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest import mock
 
 import pytest
@@ -34,12 +34,12 @@ def _make_task_instance(task_id: str = "task_id", dr_conf: dict | None = None):
         task_id=task_id,
         try_number=1,
         map_index=-1,
-        logical_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        logical_date=datetime(2024, 1, 1, tzinfo=UTC),
     )
     dag_run = mock.MagicMock(
-        logical_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        logical_date=datetime(2024, 1, 1, tzinfo=UTC),
         clear_number=0,
-        run_after=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        run_after=datetime(2024, 1, 1, tzinfo=UTC),
         conf=dr_conf or {},
     )
     ti.dag_run = dag_run
@@ -193,8 +193,8 @@ def test_emits_fail_event_with_error_message(patched_emit):
 
 def test_uses_explicit_start_and_end_times(patched_emit):
     ti = _make_task_instance()
-    start = datetime(2024, 5, 1, 10, 0, tzinfo=timezone.utc)
-    end = datetime(2024, 5, 1, 10, 5, tzinfo=timezone.utc)
+    start = datetime(2024, 5, 1, 10, 0, tzinfo=UTC)
+    end = datetime(2024, 5, 1, 10, 5, tzinfo=UTC)
     emit_query_lineage(
         query_id="qid",
         query_source_namespace="snowflake://ACCT",
@@ -307,6 +307,29 @@ def test_raises_on_context_resolution_failure_when_flag_set(patched_emit):
             query_id="qid",
             query_source_namespace="snowflake://ACCT",
             raise_on_error=True,
+        )
+
+    patched_emit.assert_not_called()
+
+
+def test_noop_when_emission_policy_blocks_emit(patched_emit):
+    from airflow.providers.openlineage.utils.emission_policy import EmissionPolicy
+
+    ti = _make_task_instance()
+    with mock.patch(
+        f"{_MODULE}.resolve_task_emission_policy",
+        return_value=EmissionPolicy(
+            emit=False,
+            extract_operator_metadata=True,
+            include_source_code=True,
+            hook_lineage=True,
+            include_full_task_info=False,
+        ),
+    ):
+        emit_query_lineage(
+            query_id="qid-1",
+            query_source_namespace="snowflake://ACCT",
+            task_instance=ti,
         )
 
     patched_emit.assert_not_called()

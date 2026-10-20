@@ -18,13 +18,6 @@
 Celery Executor
 ===============
 
-.. note::
-
-    As of Airflow 2.7.0, you need to install the ``celery`` provider package to use this executor.
-    This can be done by installing ``apache-airflow-providers-celery>=3.3.0`` or by installing Airflow
-    with the ``celery`` extra: ``pip install 'apache-airflow[celery]'``.
-
-
 ``CeleryExecutor`` is one of the ways you can scale out the number of workers. For this
 to work, you need to setup a Celery backend (**RabbitMQ**, **Redis**, **Redis Sentinel** ...),
 install the required dependencies (such as ``librabbitmq``, ``redis`` ...) and
@@ -94,6 +87,44 @@ Some caveats:
 - Make sure to set umask in ``[worker_umask]`` to set permissions for newly created files by workers.
 - Tasks can consume resources. Make sure your worker has enough resources to run ``worker_concurrency`` tasks
 - Queue names are limited to 256 characters, but each broker backend might have its own restrictions
+
+PostgreSQL result backends
+--------------------------
+
+For result backends using psycopg (v3), Airflow defaults ``connect_args.prepare_threshold`` to
+``None`` to disable automatic prepared statements. This supports a transaction-mode connection
+pooler that does not track prepared statements. The setting also works when connecting directly
+to PostgreSQL. Other database drivers, including psycopg2, do not receive this parameter.
+
+An explicit value in ``[celery] result_backend_sqlalchemy_engine_options`` takes precedence.
+For example, when connecting directly to PostgreSQL or using a pooler configured to support
+prepared statements, you can restore psycopg's default preparation threshold:
+
+.. code-block:: ini
+
+    [celery]
+    result_backend_sqlalchemy_engine_options = {"connect_args": {"prepare_threshold": 5}}
+
+Redis maintenance
+-----------------
+
+When Redis is used as the Celery broker, Airflow uses it for transient Celery messages: queued task
+commands, task acknowledgement data, and other broker-side state. Airflow task history, Dag runs,
+connections, Variables, and XCom records are stored in the Airflow metadata database and should be
+maintained with database tooling such as ``airflow db clean``. Cleaning the metadata database does not
+clean Redis, and cleaning Redis does not clean Airflow's metadata database.
+
+Do not flush or delete keys from the Redis database used by Airflow while schedulers or Celery workers
+are running. Removing broker keys while tasks are queued, running, or being acknowledged can lose
+pending work or make task state temporarily inconsistent. If you need to discard stale broker data
+after an outage, first stop Airflow schedulers and Celery workers, make sure there are no tasks that
+you intend to preserve in ``queued`` or ``running`` state, back up the Redis database if it is
+persistent, and then remove only the Redis database or keyspace configured in ``[celery] broker_url``.
+
+If you configured Redis as the Celery ``result_backend``, the same maintenance window should also
+account for result backend keys. Deleting those keys can remove Celery task result information that the
+scheduler may still query. For production deployments, Airflow recommends a database-backed result
+backend so broker cleanup and task-result storage are handled separately.
 
 See :doc:`apache-airflow:administration-and-deployment/modules_management` for details on how Python and Airflow manage modules.
 
@@ -203,6 +234,93 @@ During this process, two processes are created:
 | [11] **WorkerProcess** saves status information in **ResultBackend**.
 | [13] When **SchedulerProcess** asks **ResultBackend** again about the status, it will get information about the status of the task.
 
+.. _celery_executor:logging:
+
+Worker logging
+--------------
+
+By default the Celery worker writes plain-text logs to stdout. To emit structured
+JSON instead, enable it via the ``[logging]`` section (applies to all Airflow
+components) or override it for the worker alone with the ``[celery]`` section:
+
+.. code-block:: ini
+
+    # Global — affects the API server, scheduler, and workers:
+    [logging]
+    json_logs = True
+
+    # Or override for the Celery worker only, leaving other components unchanged:
+    [celery]
+    json_logs = True
+
+A Celery worker runs up to ``worker_concurrency`` tasks at once, so lines from concurrent
+tasks interleave on the worker's stdout. Raw ``print``/stderr lines are forwarded with
+only ``logger="task.stdout"`` and carry no task instance ID, so a log collector cannot
+attribute them to a task.
+
+The lookup order is:
+
+1. ``[celery] json_logs`` — if set, takes precedence.
+2. ``[logging] json_logs`` — used when the celery-specific key is absent.
+3. ``False`` — the default when neither key is configured.
+
+This mirrors the existing ``[logging] CELERY_LOGGING_LEVEL`` /
+``[logging] LOGGING_LEVEL`` fallback already present in the worker startup
+code.
+
+.. note::
+
+    ``[logging] json_logs`` was added in Airflow 3.2.0. On older 3.x versions the
+    global key is silently ignored (``fallback=False``), so setting only
+    ``[celery] json_logs = True`` is the safe way to enable JSON logs regardless
+    of the core version.
+
+Task log forwarding to stdout
+------------------------------
+
+Task logs are normally only written to the task-log handler (and surfaced in the
+UI). To also forward each task's subprocess stdout/stderr to the Celery worker's
+own stdout — so a container-level log collector (e.g. Kubernetes/Loki) captures
+them too — enable it via the ``[logging]`` section or override it for the Celery
+worker alone with the ``[celery]`` section. ``[logging] task_logs_to_stdout`` is not a
+global switch: it only applies to components that read it, or that leave
+``subprocess_logs_to_stdout`` unset when calling ``run_workload`` (currently the Celery
+worker and the Edge3 worker's fork path). Executors that always forward task logs to stdout, such as the
+LocalExecutor and the Kubernetes, ECS, Batch and Lambda executors, ignore it:
+
+.. code-block:: ini
+
+    # Default for components that don't set the behaviour themselves (Celery, Edge3):
+    [logging]
+    task_logs_to_stdout = True
+
+    # Or override for the Celery worker only, leaving other components unchanged:
+    [celery]
+    task_logs_to_stdout = True
+
+A Celery worker runs up to ``worker_concurrency`` tasks at once, so lines from concurrent
+tasks interleave on the worker's stdout. Raw ``print``/stderr lines are forwarded with
+only ``logger="task.stdout"`` and carry no task instance ID, so a log collector cannot
+attribute them to a task.
+
+The lookup order is:
+
+1. ``[celery] task_logs_to_stdout`` — if set, takes precedence.
+2. ``[logging] task_logs_to_stdout`` — used when the celery-specific key is absent.
+3. ``False`` — the default when neither key is configured.
+
+.. note::
+
+    This is Airflow 3+ only. On ``apache-airflow<3.0.0``, Celery tasks are routed
+    through ``execute_command`` and never reach ``supervise``, so setting either key
+    has no effect there.
+
+    ``[logging] task_logs_to_stdout`` is consulted natively by Airflow core starting
+    in 3.4.0. On earlier 3.x versions this provider resolves the ``[celery]``/
+    ``[logging]`` fallback itself, so the global key still takes effect on
+    Airflow 3.0–3.3 as long as this provider version is installed — it is not
+    limited to 3.4+.
+
 .. _celery_executor:queue:
 
 Queues
@@ -225,3 +343,11 @@ resource perspective (for say very lightweight tasks where one worker
 could take thousands of tasks without a problem), or from an environment
 perspective (you want a worker running from within the Spark cluster
 itself because it needs a very specific environment and security rights).
+
+Task-instance identity
+----------------------
+
+CeleryExecutor uses task-instance UUIDs for scheduler bookkeeping when the Airflow version supports
+them, including adoption and revocation. Celery's external task identifier remains the
+transport identity, so existing work can be adopted after a scheduler upgrade. Older
+supported Airflow versions retain coordinate keys; the provider's minimum Airflow version is unchanged.

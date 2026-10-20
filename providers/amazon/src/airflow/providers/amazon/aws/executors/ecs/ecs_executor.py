@@ -48,10 +48,18 @@ from airflow.providers.amazon.aws.executors.utils.exponential_backoff_retry impo
     exponential_backoff_retry,
 )
 from airflow.providers.amazon.aws.hooks.ecs import EcsHook
-from airflow.providers.amazon.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_3_PLUS
+from airflow.providers.amazon.version_compat import (
+    AIRFLOW_V_3_0_PLUS,
+    AIRFLOW_V_3_1_PLUS,
+    AIRFLOW_V_3_3_PLUS,
+    AIRFLOW_V_3_4_PLUS,
+)
 from airflow.providers.common.compat.sdk import AirflowException, Stats, timezone
-from airflow.utils.helpers import merge_dicts
+from airflow.utils.helpers import merge_dicts, prune_dict
 from airflow.utils.state import State
+
+if AIRFLOW_V_3_4_PLUS:
+    from airflow.executors.workloads.base import WorkloadType
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -100,17 +108,17 @@ class AwsEcsExecutor(BaseExecutor):
     """
 
     supports_multi_team: bool = True
+    supports_task_instance_uuid = hasattr(BaseExecutor, "get_task_key")
 
-    if AIRFLOW_V_3_3_PLUS:
+    if AIRFLOW_V_3_4_PLUS:
+        supported_workload_types: frozenset[WorkloadType] = frozenset(
+            {WorkloadType.EXECUTE_TASK, WorkloadType.EXECUTE_CALLBACK}
+        )
+    elif AIRFLOW_V_3_3_PLUS:
         supports_callbacks: bool = True
 
     # AWS limits the maximum number of ARNs in the describe_tasks function.
     DESCRIBE_TASKS_BATCH_SIZE = 99
-
-    if TYPE_CHECKING and AIRFLOW_V_3_0_PLUS:
-        # In the v3 path, we store workloads, not commands as strings.
-        # TODO: TaskSDK: move this type change into BaseExecutor
-        queued_tasks: dict[TaskInstanceKey, workloads.All]  # type: ignore[assignment]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -126,6 +134,10 @@ class AwsEcsExecutor(BaseExecutor):
             from airflow.providers.common.compat.sdk import conf
 
             self.conf = conf
+        # TODO: Remove this fallback once the min Airflow version for providers is >= 3.1
+        # (BaseExecutor.team_name is always defined from Airflow 3.1 onward).
+        if not hasattr(self, "team_name"):
+            self.team_name = None
 
         self.cluster = self.conf.get(CONFIG_GROUP_NAME, AllEcsConfigKeys.CLUSTER)
         self.container_name = self.conf.get(CONFIG_GROUP_NAME, AllEcsConfigKeys.CONTAINER_NAME)
@@ -143,17 +155,14 @@ class AwsEcsExecutor(BaseExecutor):
             fallback=CONFIG_DEFAULTS[AllEcsConfigKeys.MAX_RUN_TASK_ATTEMPTS],
         )
 
-    # TODO: Remove this once the minimum supported version is 3.3+, and defer to BaseExecutor.queue_workload.
-    def queue_workload(self, workload: workloads.All, session: Session | None) -> None:
-        from airflow.executors import workloads
+    if not AIRFLOW_V_3_1_PLUS:
 
-        if isinstance(workload, workloads.ExecuteTask):
+        def queue_workload(self, workload: workloads.All, session: Session | None) -> None:
+            from airflow.executors import workloads
+
+            if not isinstance(workload, workloads.ExecuteTask):
+                raise RuntimeError(f"{type(self)} cannot handle workloads of type {type(workload)}")
             self.queued_tasks[workload.ti.key] = workload
-            return
-        if AIRFLOW_V_3_3_PLUS and isinstance(workload, workloads.ExecuteCallback):
-            self.queued_callbacks[workload.callback.key] = workload
-            return
-        raise RuntimeError(f"{type(self)} cannot handle workloads of type {type(workload)}")
 
     def _process_workloads(self, workload_items: Sequence[workloads.All]) -> None:
         """:sphinx-autoapi-skip:."""
@@ -165,11 +174,14 @@ class AwsEcsExecutor(BaseExecutor):
             command: CommandType
             if isinstance(workload, workloads.ExecuteTask):
                 command = [workload]
-                key = workload.ti.key
+                key = self.get_task_key(workload.ti) if self.supports_task_instance_uuid else workload.ti.key
                 queue = workload.ti.queue
                 executor_config = workload.ti.executor_config or {}
 
-                del self.queued_tasks[key]
+                if AIRFLOW_V_3_4_PLUS:
+                    del self.executor_queues[WorkloadType.EXECUTE_TASK][key]
+                else:
+                    del self.queued_tasks[key]
                 self.execute_async(key=key, command=command, queue=queue, executor_config=executor_config)
                 self.running.add(key)
 
@@ -177,7 +189,10 @@ class AwsEcsExecutor(BaseExecutor):
                 command = [workload]
                 key = workload.callback.key
 
-                del self.queued_callbacks[key]
+                if AIRFLOW_V_3_4_PLUS:
+                    del self.executor_queues[WorkloadType.EXECUTE_CALLBACK][key]
+                else:
+                    del self.queued_callbacks[key]
                 self.execute_async(key=key, command=command, queue=None)
                 self.running.add(key)
 
@@ -641,7 +656,9 @@ class AwsEcsExecutor(BaseExecutor):
 
         Anything that is not adopted will be cleared by the scheduler and becomes eligible for re-scheduling.
         """
-        with Stats.timer("ecs_executor.adopt_task_instances.duration"):
+        with Stats.timer(
+            "ecs_executor.adopt_task_instances.duration", tags=prune_dict({"team_name": self.team_name})
+        ):
             adopted_tis: list[TaskInstance] = []
 
             if task_arns := [ti.external_executor_id for ti in tis if ti.external_executor_id]:
@@ -653,7 +670,7 @@ class AwsEcsExecutor(BaseExecutor):
 
                     self.active_workers.add_task(
                         task,
-                        ti.key,
+                        self.get_task_key(ti) if self.supports_task_instance_uuid else ti.key,
                         ti.queue or "",
                         command,
                         ti.executor_config or {},

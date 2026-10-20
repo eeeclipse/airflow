@@ -39,14 +39,6 @@ metrics:
     legacy_name: "-"
     name_variables: ["job_name"]
 
-  - name: "local_task_job.task_exit"
-    description: "Number of ``LocalTaskJob`` terminations with a ``{return_code}`` while
-    running a task ``{task_id}`` of a Dag  ``{dag_id}``.
-    Metric with job_id, dag_id, task_id and return_code tagging."
-    type: "counter"
-    legacy_name: "local_task_job.task_exit.{job_id}.{dag_id}.{task_id}.{return_code}"
-    name_variables: ["job_id", "dag_id", "task_id", "return_code"]
-
   - name: "operator_failures"
     description: "Operator ``{operator_name}`` failures."
     type: "counter"
@@ -58,6 +50,41 @@ metrics:
     type: "counter"
     legacy_name: "operator_successes_{operator_name}"
     name_variables: ["operator_name"]
+
+  - name: "resumable_job.fresh_submit"
+    description: "Number of times a ResumableJobMixin operator submitted a fresh job
+    with no prior run ID stored (first run). Metric with operator tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "resumable_job.already_succeeded"
+    description: "Number of times a ResumableJobMixin operator found a stored run ID
+    whose job had already completed successfully and skipped resubmission. Metric with operator tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "resumable_job.terminal_resubmit"
+    description: "Number of times a ResumableJobMixin operator found a stored run ID
+    whose job was in a terminal (failed) state and submitted a fresh job. Metric with operator tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "resumable_job.reconnect_attempt"
+    description: "Number of times a ResumableJobMixin operator found a stored run ID
+    on retry and attempted to reconnect. Metric with operator tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "resumable_job.reconnect_success"
+    description: "Number of times a ResumableJobMixin operator successfully reconnected
+    to an active job on retry. Metric with operator tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
 
   - name: "ti_failures"
     description: "Overall task instances failures. Metric with dag_id and task_id tagging."
@@ -97,14 +124,15 @@ metrics:
 
   - name: "dag_processing.processes"
     description: "Relative number of currently running Dag parsing processes (ie this delta is negative when,
-    since the last metric was sent, processes have completed). Metric with file_path and action tagging."
+    since the last metric was sent, processes have completed). Metric with file_path, bundle_name, and action
+    tagging, and team_name tagging in multi-team mode."
     type: "counter"
     legacy_name: "-"
     name_variables: []
 
   - name: "dag_processing.processor_timeouts"
     description: "Number of file processors that have been killed due to taking too long.
-    Metric with file_path tagging."
+    Metric with file_path and bundle_name tagging, and team_name tagging in multi-team mode."
     type: "counter"
     legacy_name: "-"
     name_variables: []
@@ -127,24 +155,6 @@ metrics:
     legacy_name: "-"
     name_variables: []
 
-  - name: "dag_file_processor_timeouts"
-    description: "(DEPRECATED) same behavior as ``dag_processing.processor_timeouts``"
-    type: "counter"
-    legacy_name: "-"
-    name_variables: []
-
-  - name: "dag_processing.manager_stalls"
-    description: "Number of stalled ``DagFileProcessorManager``"
-    type: "counter"
-    legacy_name: "-"
-    name_variables: []
-
-  - name: "dag_file_refresh_error"
-    description: "Number of failures loading any Dag files"
-    type: "counter"
-    legacy_name: "-"
-    name_variables: []
-
   - name: "scheduler.tasks.killed_externally"
     description: "Number of tasks killed externally. Metric with dag_id and task_id tagging."
     type: "counter"
@@ -159,6 +169,33 @@ metrics:
 
   - name: "scheduler.orphaned_tasks.adopted"
     description: "Number of Orphaned tasks adopted by the Scheduler"
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.loop_exceptions"
+    description: "Number of times the scheduler loop exited with an unhandled exception.
+    Metric with exception_class tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.executor_events.processed"
+    description: "Number of executor events processed per ``process_executor_events`` call."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.executor_events.failed"
+    description: "Number of times ``process_executor_events`` raised an exception.
+    Metric with exception_class tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.zombies.detected"
+    description: "Number of zombie task instances detected by the Scheduler.
+    Metric with reason tagging (``heartbeat_timeout``)."
     type: "counter"
     legacy_name: "-"
     name_variables: []
@@ -190,6 +227,21 @@ metrics:
     type: "counter"
     legacy_name: "-"
     name_variables: []
+
+  - name: "dag.serialization.version_created"
+    description: "Number of times a Dag was serialized into a new Dag version, on its first serialization
+    or when its latest version already has task instances. Metric with dag_id and bundle_name tagging."
+    type: "counter"
+    legacy_name: "dag.serialization.version_created.{dag_id}.{bundle_name}"
+    name_variables: ["dag_id", "bundle_name"]
+
+  - name: "dag.serialization.version_updated"
+    description: "Number of times a Dag was serialized over its latest Dag version in place, without
+    creating a new version, because that version has no task instances. Metric with dag_id and
+    bundle_name tagging."
+    type: "counter"
+    legacy_name: "dag.serialization.version_updated.{dag_id}.{bundle_name}"
+    name_variables: ["dag_id", "bundle_name"]
 
   - name: "celery.task_timeout_error"
     description: "Number of ``AirflowTaskTimeout`` errors raised when publishing Task to Celery Broker."
@@ -274,6 +326,12 @@ metrics:
     legacy_name: "-"
     name_variables: []
 
+  - name: "deadline_alerts.deadline_creation_failed"
+    description: "Number of deadline alerts skipped because their deadline could not be created"
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
   - name: "deadline_alerts.deadline_missed"
     description: "Number of deadline alerts that fired because a Dag run missed its deadline"
     type: "counter"
@@ -310,6 +368,24 @@ metrics:
     legacy_name: "-"
     name_variables: []
 
+  - name: "scheduler.dag_bag.cache_hit"
+    description: "Number of cache hits when retrieving SerializedDAG from DBDagBag in the scheduler"
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.dag_bag.cache_miss"
+    description: "Number of cache misses when retrieving SerializedDAG from DBDagBag in the scheduler"
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.dag_bag.cache_clear"
+    description: "Number of times the DBDagBag cache was cleared in the scheduler"
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
   - name: "connection_test.success"
     description: "Number of worker-dispatched connection tests that completed successfully."
     type: "counter"
@@ -329,6 +405,36 @@ metrics:
     legacy_name: "-"
     name_variables: []
 
+  - name: "managed_agent.failover"
+    description: "Number of failover transitions inside a ``FailoverManagedAgentClient`` group,
+    emitted once each time a member fails and the next one is tried. Metric with from_platform
+    and to_platform tagging; a platform reads ``unknown`` when that member's identity could not
+    be resolved."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: ["from_platform", "to_platform"]
+
+  - name: "managed_agent.served"
+    description: "Number of managed agent invocations answered through a managed-agent toolset,
+    emitted once per answer. Metric with tool and platform tagging; a toolset over a failover
+    group reports the platform as ``failover``, and platform is the literal string ``unknown``
+    when the agent's identity fails to resolve -- a connection lookup failing, or a bug in the
+    subclass's own ``agent_ref`` implementation -- a case in which the call still proceeds after
+    logging a warning. Read next to ``managed_agent.failover``, which records each transition by
+    platform."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: ["tool", "platform"]
+
+  - name: "common_ai.tool_calls"
+    description: "Number of calls to a toolset of the common.ai provider. Metric with toolset
+    (the toolset class), framework (``pydantic_ai``, ``strands``, ``adk``, ``langchain``,
+    ``anthropic``, ``openai_agents`` or ``none``) and outcome (``executed``, ``failed`` or
+    ``replayed``) tagging."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: ["toolset", "framework", "outcome"]
+
   # ==========
   # Gauges
   # ==========
@@ -340,6 +446,12 @@ metrics:
 
   - name: "api_server.dag_bag.cache_size"
     description: "Current number of SerializedDAG objects cached in the API server's DBDagBag"
+    type: "gauge"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.dag_bag.cache_size"
+    description: "Current number of SerializedDAG objects cached in the scheduler's DBDagBag"
     type: "gauge"
     legacy_name: "-"
     name_variables: []
@@ -376,20 +488,21 @@ metrics:
     legacy_name: "-"
     name_variables: []
 
-  - name: "dag_processing.last_run.seconds_ago.{dag_file}"
-    description: "Seconds since ``{dag_file}`` was last processed"
+  - name: "dag_processing.last_run.seconds_ago"
+    description: "Seconds since a DAG file was last processed.
+    Metric with file_path, bundle_name and file_name tagging."
     type: "gauge"
-    legacy_name: "-"
-    name_variables: ["dag_file"]
-
-  - name: "dag_processing.last_num_of_db_queries.{dag_file}"
-    description: "Number of queries to Airflow database during parsing per ``{dag_file}``"
-    type: "gauge"
-    legacy_name: "-"
-    name_variables: ["dag_file"]
+    legacy_name: "dag_processing.last_run.seconds_ago.{file_name}"
+    name_variables: ["file_name"]
 
   - name: "scheduler.tasks.starving"
     description: "Number of tasks that cannot be scheduled because of no open slot in pool"
+    type: "gauge"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "scheduler.executor_events.batch_size"
+    description: "Number of executor events in the batch processed per ``process_executor_events`` call."
     type: "gauge"
     legacy_name: "-"
     name_variables: []
@@ -402,10 +515,18 @@ metrics:
     name_variables: []
 
   - name: "scheduler.dagruns.running"
-    description: "Number of DAGs whose latest DagRun is currently in the ``RUNNING`` state"
+    description: "Number of DagRuns currently in the ``RUNNING`` state. Emitted as a single aggregate
+    value by default; tagged by dag_id instead when ``[scheduler] dagrun_metrics_per_dag_id`` is enabled."
     type: "gauge"
-    legacy_name: "-"
-    name_variables: []
+    legacy_name: "scheduler.dagruns.running.{dag_id}"
+    name_variables: ["dag_id"]
+
+  - name: "scheduler.dagruns.queued"
+    description: "Number of DagRuns currently in the ``QUEUED`` state. Emitted as a single aggregate
+    value by default; tagged by dag_id instead when ``[scheduler] dagrun_metrics_per_dag_id`` is enabled."
+    type: "gauge"
+    legacy_name: "scheduler.dagruns.queued.{dag_id}"
+    name_variables: ["dag_id"]
 
   - name: "executor.open_slots"
     description: "Number of open slots on executor. Legacy metric only emitted
@@ -589,9 +710,27 @@ metrics:
     legacy_name: "-"
     name_variables: ["status"]
 
+  - name: "http_requests_total"
+    description: "Number of completed REST API requests, tagged by method, route, and status_family.
+    Breaking the total down by those tags needs a backend that carries them (``otel_on``,
+    ``statsd_influxdb_enabled`` or ``statsd_datadog_enabled``); classic StatsD drops the tags and
+    reports only the overall request count."
+    type: "counter"
+    legacy_name: "-"
+    name_variables: []
+
   # ==========
   # Timers
   # ==========
+  - name: "http_request_duration_milliseconds"
+    description: "Milliseconds taken to complete a REST API request, tagged by method, route,
+    and status_family. Breaking the timings down by those tags needs a backend that carries them
+    (``otel_on``, ``statsd_influxdb_enabled`` or ``statsd_datadog_enabled``); classic StatsD drops
+    the tags and reports only the overall request duration."
+    type: "timer"
+    legacy_name: "-"
+    name_variables: []
+
   - name: "dagrun.dependency-check"
     description: "Milliseconds taken to check Dag dependencies"
     type: "timer"
@@ -641,6 +780,12 @@ metrics:
     legacy_name: "dagrun.schedule_delay.{dag_id}"
     name_variables: ["dag_id"]
 
+  - name: "triggerer.batch_trigger_creation_duration"
+    description: "Time in milliseconds spent creating a batch of pending triggers."
+    type: "timer"
+    legacy_name: "-"
+    name_variables: []
+
   - name: "scheduler.critical_section_duration"
     description: "Milliseconds spent in the critical section of scheduler loop"
     type: "timer"
@@ -666,6 +811,13 @@ metrics:
     legacy_name: "-"
     name_variables: []
 
+  - name: "triggerer.trigger_queue_delay"
+    description: "Time in milliseconds between a trigger workload being queued and being processed by
+      the TriggerRunner."
+    type: "timer"
+    legacy_name: "-"
+    name_variables: []
+
   - name: "dagrun.first_task_scheduling_delay"
     description: "Milliseconds elapsed between first task start_date and dagrun expected start"
     type: "timer"
@@ -674,18 +826,6 @@ metrics:
 
   - name: "dagrun.first_task_start_delay"
     description: "Milliseconds elapsed between dagrun queued_at and first task start_date"
-    type: "timer"
-    legacy_name: "-"
-    name_variables: []
-
-  - name: "collect_db_dags"
-    description: "Milliseconds taken for fetching all Serialized Dags from DB"
-    type: "timer"
-    legacy_name: "-"
-    name_variables: []
-
-  - name: "kubernetes_executor.clear_not_launched_queued_tasks.duration"
-    description: "Milliseconds taken for clearing not launched queued tasks in Kubernetes Executor"
     type: "timer"
     legacy_name: "-"
     name_variables: []
@@ -699,6 +839,19 @@ metrics:
   - name: "kubernetes_executor.pod_creation"
     description: "Milliseconds taken for a Kubernetes create_namespaced_pod call from the Kubernetes Executor"
     type: "timer"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "kubernetes_executor.pod_creation_batch_duration"
+    description: "Milliseconds taken to create one batch of worker pods in a Kubernetes Executor scheduler
+    loop, covering both the sequential and the concurrent (``async_pod_creation``) creation paths."
+    type: "timer"
+    legacy_name: "-"
+    name_variables: []
+
+  - name: "kubernetes_executor.pod_creation_batch_size"
+    description: "Number of worker pods created in one Kubernetes Executor scheduler loop."
+    type: "gauge"
     legacy_name: "-"
     name_variables: []
 

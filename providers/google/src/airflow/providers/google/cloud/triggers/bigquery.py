@@ -120,43 +120,45 @@ class BigQueryInsertJobTrigger(BaseTrigger):
 
         @provide_session
         def get_task_instance(self, *, session: Session) -> TaskInstance:
+            ti = self.task_instance
+            if ti is None:
+                raise RuntimeError("task_instance is not set on the trigger")
             task_instance = session.scalar(
                 select(TaskInstance).where(
-                    TaskInstance.dag_id == self.task_instance.dag_id,
-                    TaskInstance.task_id == self.task_instance.task_id,
-                    TaskInstance.run_id == self.task_instance.run_id,
-                    TaskInstance.map_index == self.task_instance.map_index,
+                    TaskInstance.dag_id == ti.dag_id,
+                    TaskInstance.task_id == ti.task_id,
+                    TaskInstance.run_id == ti.run_id,
+                    TaskInstance.map_index == ti.map_index,
                 )
             )
             if task_instance is None:
-                raise AirflowException(
-                    "TaskInstance with dag_id: %s, task_id: %s, run_id: %s and map_index: %s is not found",
-                    self.task_instance.dag_id,
-                    self.task_instance.task_id,
-                    self.task_instance.run_id,
-                    self.task_instance.map_index,
+                msg = (
+                    f"TaskInstance with dag_id: {ti.dag_id}, task_id: {ti.task_id}, "
+                    f"run_id: {ti.run_id} and map_index: {ti.map_index} is not found"
                 )
+                raise AirflowException(msg)
             return task_instance
 
         async def get_task_state(self):
             from airflow.sdk.execution_time.task_runner import RuntimeTaskInstance
 
+            ti = self.task_instance
+            if ti is None:
+                raise RuntimeError("task_instance is not set on the trigger")
             task_states_response = await sync_to_async(RuntimeTaskInstance.get_task_states)(
-                dag_id=self.task_instance.dag_id,
-                task_ids=[self.task_instance.task_id],
-                run_ids=[self.task_instance.run_id],
-                map_index=self.task_instance.map_index,
+                dag_id=ti.dag_id,
+                task_ids=[ti.task_id],
+                run_ids=[ti.run_id],
+                map_index=ti.map_index,
             )
             try:
-                task_state = task_states_response[self.task_instance.run_id][self.task_instance.task_id]
+                task_state = task_states_response[ti.run_id][ti.task_id]
             except Exception:
-                raise AirflowException(
-                    "TaskInstance with dag_id: %s, task_id: %s, run_id: %s and map_index: %s is not found",
-                    self.task_instance.dag_id,
-                    self.task_instance.task_id,
-                    self.task_instance.run_id,
-                    self.task_instance.map_index,
+                msg = (
+                    f"TaskInstance with dag_id: {ti.dag_id}, task_id: {ti.task_id}, "
+                    f"run_id: {ti.run_id} and map_index: {ti.map_index} is not found"
                 )
+                raise AirflowException(msg)
             return task_state
 
         async def safe_to_cancel(self) -> bool:
@@ -579,18 +581,25 @@ class BigQueryIntervalCheckTrigger(BigQueryInsertJobTrigger):
                         }
                     )
                     return
-                elif (
-                    first_job_response_from_hook["status"] == "pending"
-                    or second_job_response_from_hook["status"] == "pending"
+                elif "error" in (
+                    first_job_response_from_hook["status"],
+                    second_job_response_from_hook["status"],
                 ):
+                    # Report the job that failed, which is not necessarily the second one.
+                    failed_job_response = (
+                        first_job_response_from_hook
+                        if first_job_response_from_hook["status"] == "error"
+                        else second_job_response_from_hook
+                    )
+                    yield TriggerEvent(
+                        {"status": "error", "message": failed_job_response["message"], "data": None}
+                    )
+                    return
+                else:
+                    # Neither job failed, and at least one is still "pending" or "running".
                     self.log.info("Query is still running...")
                     self.log.info("Sleeping for %s seconds.", self.poll_interval)
                     await asyncio.sleep(self.poll_interval)
-                else:
-                    yield TriggerEvent(
-                        {"status": "error", "message": second_job_response_from_hook["message"], "data": None}
-                    )
-                    return
 
         except Exception as e:
             self.log.exception("Exception occurred while checking for query completion")
@@ -682,15 +691,16 @@ class BigQueryValueCheckTrigger(BigQueryInsertJobTrigger):
                     hook.value_check(self.sql, self.pass_value, _records, self.tolerance)
                     yield TriggerEvent({"status": "success", "message": "Job completed", "records": _records})
                     return
-                elif response_from_hook["status"] == "pending":
-                    self.log.info("Query is still running...")
-                    self.log.info("Sleeping for %s seconds.", self.poll_interval)
-                    await asyncio.sleep(self.poll_interval)
-                else:
+                elif response_from_hook["status"] == "error":
                     yield TriggerEvent(
                         {"status": "error", "message": response_from_hook["message"], "records": None}
                     )
                     return
+                else:
+                    # The job is still "pending" or "running".
+                    self.log.info("Query is still running...")
+                    self.log.info("Sleeping for %s seconds.", self.poll_interval)
+                    await asyncio.sleep(self.poll_interval)
         except Exception as e:
             self.log.exception("Exception occurred while checking for query completion")
             yield TriggerEvent({"status": "error", "message": str(e)})

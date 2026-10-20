@@ -20,9 +20,7 @@ from __future__ import annotations
 import copy
 import os
 from collections.abc import MutableMapping
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
-
-from typing_extensions import NotRequired
+from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     import jinja2
@@ -31,10 +29,11 @@ if TYPE_CHECKING:
     from airflow.sdk.bases.operator import BaseOperator
     from airflow.sdk.definitions.dag import DAG
     from airflow.sdk.execution_time.context import (
-        AssetStoreAccessors,
+        AssetStateStoreAccessors,
         InletEventsAccessors,
-        TaskStoreAccessor,
+        TaskStateStoreAccessor,
     )
+    from airflow.sdk.execution_time.loop import LoopContextAccessor
     from airflow.sdk.types import (
         DagRunProtocol,
         Operator,
@@ -59,11 +58,13 @@ class Context(TypedDict, total=False):
     inlets: list
     inlet_events: InletEventsAccessors
     logical_date: DateTime
+    loop: LoopContextAccessor
     macros: Any
     map_index_template: NotRequired[str | None]
     outlets: list
     params: dict[str, Any]
     partition_key: NotRequired[str | None]
+    partition_date: NotRequired[DateTime | None]
     prev_data_interval_start_success: NotRequired[DateTime | None]
     prev_data_interval_end_success: NotRequired[DateTime | None]
     prev_start_date_success: NotRequired[DateTime | None]
@@ -76,8 +77,8 @@ class Context(TypedDict, total=False):
     task_reschedule_count: int
     task_instance: RuntimeTaskInstanceProtocol
     task_instance_key_str: str
-    task_store: TaskStoreAccessor
-    asset_store: AssetStoreAccessors
+    task_state_store: TaskStateStoreAccessor
+    asset_state_store: AssetStateStoreAccessors
     # `templates_dict` is only set in PythonOperator
     templates_dict: NotRequired[dict[str, Any] | None]
     test_mode: bool
@@ -91,7 +92,7 @@ class Context(TypedDict, total=False):
     var: Any
 
 
-KNOWN_CONTEXT_KEYS: set[str] = set(Context.__annotations__.keys())
+KNOWN_CONTEXT_KEYS: set[str] = set(Context.__annotations__.keys()) - {"loop"}
 
 
 def context_merge(context: Context, *args: Any, **kwargs: Any) -> None:

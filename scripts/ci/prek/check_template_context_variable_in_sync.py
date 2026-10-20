@@ -17,7 +17,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10,<3.11"
+# requires-python = ">=3.11,<3.12"
 # dependencies = [
 #   "rich>=13.6.0",
 # ]
@@ -48,9 +48,11 @@ IGNORE = {
     "data_interval_start",
     "prev_data_interval_start_success",
     "prev_data_interval_end_success",
-    # AIP-103: task_state/asset_state aren't documented yet. Will be done in a later PR.
-    "task_store",
-    "asset_store",
+    # AIP-103: task_state_store/asset_state_store aren't documented in templates-ref yet. Will be done in a later PR.
+    "task_state_store",
+    "asset_state_store",
+    # Only available inside private loop groups.
+    "loop",
 }
 
 

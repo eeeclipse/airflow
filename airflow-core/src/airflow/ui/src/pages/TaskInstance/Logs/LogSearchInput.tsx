@@ -16,13 +16,16 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { CloseButton, HStack, Input, InputGroup, Text } from "@chakra-ui/react";
 import { useRef, type KeyboardEvent } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
+
+import { CloseButton, HStack, Input, InputGroup, Text } from "@chakra-ui/react";
 import { useTranslation } from "react-i18next";
 import { FiChevronDown, FiChevronUp, FiSearch } from "react-icons/fi";
 
-import { IconButton } from "src/components/ui";
+import { IconButton } from "src/system-components";
+
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useShortcut } from "src/hooks/useShortcut";
 
 export type LogSearchInputProps = {
   readonly currentMatchIndex: number;
@@ -44,14 +47,14 @@ export const LogSearchInput = ({
   const { t: translate } = useTranslation("dag");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  useHotkeys(
-    "/",
-    (event) => {
+  useShortcut({
+    ...SHORTCUTS.logs.focusLogSearch,
+    callback: (event) => {
       event.preventDefault();
       searchInputRef.current?.focus();
     },
-    { enableOnFormTags: false },
-  );
+    options: { enableOnFormTags: false },
+  });
 
   const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") {

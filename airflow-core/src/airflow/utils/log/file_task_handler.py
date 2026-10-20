@@ -23,33 +23,31 @@ import heapq
 import io
 import logging
 import os
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Generator, Iterator
 from contextlib import suppress
 from datetime import datetime
 from enum import Enum
 from itertools import chain, islice
 from pathlib import Path
 from types import GeneratorType
-from typing import IO, TYPE_CHECKING, TypedDict, cast
+from typing import IO, TYPE_CHECKING, NotRequired, TypedDict, cast
 from urllib.parse import urljoin
 
 import pendulum
 from pydantic import BaseModel, ConfigDict, ValidationError
-from typing_extensions import NotRequired
 
 from airflow.configuration import conf
 from airflow.executors.executor_loader import ExecutorLoader
-from airflow.utils.helpers import parse_template_string, render_template
 from airflow.utils.log.log_stream_accumulator import LogStreamAccumulator
 from airflow.utils.log.logging_mixin import SetContextPropagate
 from airflow.utils.log.non_caching_file_handler import NonCachingRotatingFileHandler
-from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.state import State, TaskInstanceState
 
 if TYPE_CHECKING:
     from typing import TypeAlias
 
     from requests import Response
+    from sqlalchemy.orm import Session
 
     from airflow._shared.logging.remote import (
         LogMessages,
@@ -60,7 +58,6 @@ if TYPE_CHECKING:
     )
     from airflow.executors.base_executor import BaseExecutor
     from airflow.models.taskinstance import TaskInstance
-    from airflow.models.taskinstancehistory import TaskInstanceHistory
 
 CHUNK_SIZE = 1024 * 1024 * 5  # 5MB
 DEFAULT_SORT_DATETIME = pendulum.datetime(2000, 1, 1)
@@ -398,7 +395,7 @@ def _interleave_logs(*log_streams: RawLogStream) -> StructuredLogStream:
 
 def _is_logs_stream_like(log) -> bool:
     """Check if the logs are stream-like."""
-    return isinstance(log, (chain, GeneratorType))
+    return isinstance(log, (chain, islice, GeneratorType))
 
 
 def _get_compatible_log_stream(
@@ -462,9 +459,7 @@ class FileTaskHandler(logging.Handler):
         Some handlers emit "end of log" markers, and may not wish to do so when task defers.
         """
 
-    def set_context(
-        self, ti: TaskInstance | TaskInstanceHistory, *, identifier: str | None = None
-    ) -> None | SetContextPropagate:
+    def set_context(self, ti: TaskInstance, *, identifier: str | None = None) -> None | SetContextPropagate:
         """
         Provide task_instance context to airflow task handler.
 
@@ -519,69 +514,36 @@ class FileTaskHandler(logging.Handler):
         if self.handler:
             self.handler.close()
 
-    @provide_session
-    def _render_filename(
-        self, ti: TaskInstance | TaskInstanceHistory, try_number: int, *, session=NEW_SESSION
-    ) -> str:
+    def _render_filename(self, ti: TaskInstance, try_number: int, *, session: Session | None = None) -> str:
         """Return the worker log filename."""
-        dag_run = ti.get_dagrun(session=session)
+        from airflow.utils.log.task_log_address import prepare_task_log_contexts, render_task_log_filename
 
-        date = dag_run.logical_date or dag_run.run_after
-        formatted_date = date.isoformat()
+        context = prepare_task_log_contexts([ti], session=session)[ti.id]
+        return render_task_log_filename(ti, try_number, context=context)
 
-        template = dag_run.get_log_template(session=session).filename
-        str_tpl, jinja_tpl = parse_template_string(template)
-        if jinja_tpl:
-            return render_template(
-                jinja_tpl, {"ti": ti, "ts": formatted_date, "try_number": try_number}, native=False
-            )
-
-        if str_tpl:
-            data_interval = (dag_run.data_interval_start, dag_run.data_interval_end)
-            if data_interval[0]:
-                data_interval_start = data_interval[0].isoformat()
-            else:
-                data_interval_start = ""
-            if data_interval[1]:
-                data_interval_end = data_interval[1].isoformat()
-            else:
-                data_interval_end = ""
-            return str_tpl.format(
-                dag_id=ti.dag_id,
-                task_id=ti.task_id,
-                run_id=ti.run_id,
-                data_interval_start=data_interval_start,
-                data_interval_end=data_interval_end,
-                logical_date=formatted_date,
-                try_number=try_number,
-            )
-        raise RuntimeError(f"Unable to render log filename for {ti}. This should never happen")
-
-    def _get_executor_get_task_log(
-        self, ti: TaskInstance | TaskInstanceHistory
-    ) -> Callable[[TaskInstance | TaskInstanceHistory, int], tuple[list[str], list[str]]]:
+    def _get_executor(self, ti: TaskInstance) -> BaseExecutor:
         """
-        Get the get_task_log method from executor of current task instance.
+        Get the executor of current task instance.
 
         Since there might be multiple executors, so we need to get the executor of current task instance instead of getting from default executor.
 
         :param ti: task instance object
-        :return: get_task_log method of the executor
+        :return: executor of the task instance
         """
         executor_name = ti.executor or self.DEFAULT_EXECUTOR_KEY
         executor = self.executor_instances.get(executor_name)
-        if executor is not None:
-            return executor.get_task_log
+        if executor is None:
+            if executor_name == self.DEFAULT_EXECUTOR_KEY:
+                executor = ExecutorLoader.get_default_executor()
+            else:
+                executor = ExecutorLoader.load_executor(executor_name)
+            self.executor_instances[executor_name] = executor
 
-        if executor_name == self.DEFAULT_EXECUTOR_KEY:
-            self.executor_instances[executor_name] = ExecutorLoader.get_default_executor()
-        else:
-            self.executor_instances[executor_name] = ExecutorLoader.load_executor(executor_name)
-        return self.executor_instances[executor_name].get_task_log
+        return executor
 
     def _read(
         self,
-        ti: TaskInstance | TaskInstanceHistory,
+        ti: TaskInstance,
         try_number: int,
         metadata: LogMetadata | None = None,
     ) -> tuple[LogHandlerOutputStream | LegacyProvidersLogType, LogMetadata]:
@@ -632,23 +594,29 @@ class FileTaskHandler(logging.Handler):
                 raise TypeError("Logs should be either a list of strings or a generator of log lines.")
             # Extend LogSourceInfo
             source_list.extend(sources)
-        has_k8s_exec_pod = False
+
+        has_executor_log = False
         if ti.state == TaskInstanceState.RUNNING:
-            executor_get_task_log = self._get_executor_get_task_log(ti)
-            response = executor_get_task_log(ti, try_number)
-            if response:
-                sources, logs = response
+            executor = self._get_executor(ti)
+            try:
+                # check for streaming logs first
+                sources, executor_logs = executor.get_streaming_task_log(ti, try_number)
+            except NotImplementedError:
+                # fallback to non-streaming logs if streaming not supported
+                sources, logs = executor.get_task_log(ti, try_number)
                 # make the logs stream-like compatible
                 executor_logs = [_get_compatible_log_stream(logs)]
+
             if sources:
                 source_list.extend(sources)
-                has_k8s_exec_pod = True
+                has_executor_log = True
+
         if not (remote_logs and ti.state not in State.unfinished):
             # when finished, if we have remote logs, no need to check local
             worker_log_full_path = Path(self.local_base, worker_log_rel_path)
             sources, local_logs = self._read_from_local(worker_log_full_path)
             source_list.extend(sources)
-        if ti.state in (TaskInstanceState.RUNNING, TaskInstanceState.DEFERRED) and not has_k8s_exec_pod:
+        if ti.state in (TaskInstanceState.RUNNING, TaskInstanceState.DEFERRED) and not has_executor_log:
             sources, served_logs = self._read_from_logs_server(ti, worker_log_rel_path)
             source_list.extend(sources)
         elif (ti.state not in State.unfinished or ti.state in _STATES_WITH_COMPLETED_ATTEMPT) and not (
@@ -696,7 +664,7 @@ class FileTaskHandler(logging.Handler):
             }
 
     @staticmethod
-    def _get_pod_namespace(ti: TaskInstance | TaskInstanceHistory):
+    def _get_pod_namespace(ti: TaskInstance):
         pod_override = getattr(ti.executor_config, "pod_override", None)
         metadata = getattr(pod_override, "metadata", None)
         namespace = None
@@ -706,7 +674,7 @@ class FileTaskHandler(logging.Handler):
 
     def _get_log_retrieval_url(
         self,
-        ti: TaskInstance | TaskInstanceHistory,
+        ti: TaskInstance,
         log_relative_path: str,
         log_type: LogType | None = None,
     ) -> tuple[str | None, str | None]:
@@ -714,7 +682,18 @@ class FileTaskHandler(logging.Handler):
         if log_type == LogType.TRIGGER:
             if not ti.triggerer_job:
                 raise RuntimeError("Could not build triggerer log URL; no triggerer job.")
-            config_key = "triggerer_log_server_port"
+            config_key = "trigger_log_server_port"
+            deprecated_config_key = "triggerer_log_server_port"
+            if (
+                conf.get("logging", config_key, fallback=None) is None
+                and conf.get("logging", deprecated_config_key, fallback=None) is not None
+            ):
+                logger.warning(
+                    "The [logging] %s option is deprecated. Please use [logging] %s instead.",
+                    deprecated_config_key,
+                    config_key,
+                )
+                config_key = deprecated_config_key
             config_default = 8794
             hostname = ti.triggerer_job.hostname
             log_relative_path = self.add_triggerer_suffix(log_relative_path, job_id=ti.triggerer_job.id)
@@ -736,7 +715,7 @@ class FileTaskHandler(logging.Handler):
 
     def read(
         self,
-        task_instance: TaskInstance | TaskInstanceHistory,
+        task_instance: TaskInstance,
         try_number: int | None = None,
         metadata: LogMetadata | None = None,
     ) -> tuple[LogHandlerOutputStream, LogMetadata]:
@@ -899,7 +878,7 @@ class FileTaskHandler(logging.Handler):
 
     def _read_from_logs_server(
         self,
-        ti: TaskInstance | TaskInstanceHistory,
+        ti: TaskInstance,
         worker_log_rel_path: str,
     ) -> StreamingLogResponse:
         sources: LogSourceInfo = []

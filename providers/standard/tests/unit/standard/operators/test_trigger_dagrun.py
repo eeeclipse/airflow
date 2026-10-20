@@ -40,16 +40,12 @@ from airflow.utils.types import DagRunType
 from tests_common.test_utils.db import parse_and_sync_to_db
 from tests_common.test_utils.version_compat import (
     AIRFLOW_V_3_0_PLUS,
-    AIRFLOW_V_3_1_PLUS,
     AIRFLOW_V_3_2_PLUS,
 )
 
 if AIRFLOW_V_3_0_PLUS:
     from airflow.providers.common.compat.sdk import DagRunTriggerException
-if AIRFLOW_V_3_1_PLUS:
-    from airflow.sdk import timezone
-else:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
+from airflow.providers.common.compat.sdk import timezone
 
 pytestmark = pytest.mark.db_test
 
@@ -105,7 +101,7 @@ class TestDagRunOperator:
             if AIRFLOW_V_3_0_PLUS:
                 from airflow.models.dagbundle import DagBundleModel
 
-                session.execute(delete(DagBundleModel))
+                session.execute(delete(DagBundleModel).where(DagBundleModel.name == "test_bundle"))
             session.commit()
 
     @pytest.mark.skipif(not AIRFLOW_V_3_0_PLUS, reason="Implementation is different for Airflow 2 & 3")
@@ -204,6 +200,35 @@ class TestDagRunOperator:
         assert link == expected_url, f"Expected {expected_url}, but got {link}"
 
     @pytest.mark.skipif(not AIRFLOW_V_3_0_PLUS, reason="Implementation is different for Airflow 2 & 3")
+    def test_trigger_dagrun_pushes_extra_link_xcom_before_exception(self):
+        """
+        Eagerly push the "Triggered DAG" extra-link URL so the UI button is available
+        while the task is still running/deferred, not only after finalize() runs.
+        """
+        from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunLink
+        from airflow.utils import helpers
+
+        build_url_fn = getattr(helpers, "build_airflow_dagrun_url", None)
+        if not build_url_fn:
+            pytest.skip("Skipping because build_airflow_dagrun_url is not available in this Airflow version")
+
+        task = TriggerDagRunOperator(
+            task_id="test_task",
+            trigger_dag_id=TRIGGERED_DAG_ID,
+            trigger_run_id="custom_run_id",
+        )
+
+        ti_mock = mock.MagicMock()
+        with pytest.raises(DagRunTriggerException):
+            task.execute(context={"task_instance": ti_mock})
+
+        expected_url = build_url_fn(dag_id=TRIGGERED_DAG_ID, run_id="custom_run_id")
+        ti_mock.xcom_push.assert_called_once_with(
+            key=TriggerDagRunLink().xcom_key,
+            value=expected_url,
+        )
+
+    @pytest.mark.skipif(not AIRFLOW_V_3_0_PLUS, reason="Implementation is different for Airflow 2 & 3")
     def test_trigger_dagrun_custom_run_id(self):
         task = TriggerDagRunOperator(
             task_id="test_task",
@@ -230,6 +255,15 @@ class TestDagRunOperator:
 
         assert exc_info.value.logical_date == timezone.datetime(2021, 1, 2, 3, 4, 5)
 
+    def test_trigger_dagrun_with_invalid_logical_date_type_fails_at_execute_time(self):
+        task = TriggerDagRunOperator(
+            task_id="test_trigger_dagrun_with_invalid_logical_date_type",
+            trigger_dag_id=TRIGGERED_DAG_ID,
+            logical_date=12345,
+        )
+        with pytest.raises(TypeError, match="Expected str, datetime.datetime, or None"):
+            task.execute(context={})
+
     def test_trigger_dagrun_operator_templated_invalid_conf(self, dag_maker):
         """Test passing a conf that is not JSON Serializable raise error."""
         with dag_maker(
@@ -243,7 +277,7 @@ class TestDagRunOperator:
         dag_maker.sync_dagbag_to_db()
         parse_and_sync_to_db(self.f_name)
         dr = dag_maker.create_dagrun()
-        with pytest.raises(ValueError, match="conf parameter should be JSON Serializable"):
+        with pytest.raises(ValueError, match="conf parameter should be JSON Serializable: "):
             dag_maker.run_ti(task.task_id, dr)
 
     def test_trigger_dagrun_with_no_failed_state(self, dag_maker):
@@ -421,7 +455,7 @@ class TestDagRunOperator:
                 conf="{'foo': 'bar', 'key': 123}",
             )
 
-            with pytest.raises(ValueError, match="conf parameter should be JSON Serializable"):
+            with pytest.raises(ValueError, match="conf parameter should be JSON Serializable: "):
                 task.execute(context={})
 
     @pytest.mark.parametrize("original_conf", (None, {}, {"foo": "bar"}))

@@ -208,7 +208,7 @@ def build_mime_message(
         basename = os.path.basename(fname)
         with open(fname, "rb") as file:
             part = MIMEApplication(file.read(), Name=basename)
-            part["Content-Disposition"] = f'attachment; filename="{basename}"'
+            part.add_header("Content-Disposition", "attachment", filename=basename)
             part["Content-ID"] = f"<{basename}>"
             msg.attach(part)
 
@@ -257,8 +257,8 @@ def send_mime_email(
         log.debug("No user/password found for SMTP, so logging in with no authentication.")
 
     if not dryrun:
-        for attempt in range(1, smtp_retry_limit + 1):
-            log.info("Email alerting: attempt %s", str(attempt))
+        for attempt in range(smtp_retry_limit + 1):
+            log.info("Email alerting: attempt %s", str(attempt + 1))
             try:
                 smtp_conn = _get_smtp_connection(smtp_host, smtp_port, smtp_timeout, smtp_ssl)
             except smtplib.SMTPServerDisconnected:

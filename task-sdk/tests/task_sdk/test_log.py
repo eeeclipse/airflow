@@ -17,104 +17,105 @@
 # under the License.
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from unittest import mock
 
+import pytest
 import structlog
-import structlog.testing
-from uuid6 import uuid7
 
 from airflow.sdk import log as sdk_log
+from airflow.sdk.execution_time.comms import MaskSecret
 
 
-def _make_ti():
-    ti = mock.MagicMock()
-    ti.id = uuid7()
-    return ti
+class TestConfigureLogging:
+    @pytest.mark.parametrize("sending_to_supervisor", [True, False])
+    @mock.patch("airflow.sdk.log.load_remote_log_handler")
+    @mock.patch("airflow.sdk._shared.logging.configure_logging")
+    def test_injects_remote_processors_after_dictconfig(
+        self, mock_configure_logging, mock_load_remote_log_handler, sending_to_supervisor
+    ):
+        initial_processor = mock.Mock()
+        final_renderer = mock.Mock()
+        remote_processor = mock.Mock()
+        remote_handler = mock.Mock(spec=["processors"])
+        remote_handler.processors = (remote_processor,)
+        calls = []
+
+        def configure_structlog(**_):
+            calls.append("dictConfig")
+            structlog.configure(processors=[initial_processor, final_renderer])
+
+        def load_remote_handler():
+            calls.append("load_remote_log_handler")
+            return remote_handler
+
+        mock_configure_logging.side_effect = configure_structlog
+        mock_load_remote_log_handler.side_effect = load_remote_handler
+        original_processors = structlog.get_config()["processors"]
+        sdk_log.configure_logging.cache_clear()
+
+        try:
+            sdk_log.configure_logging(sending_to_supervisor=sending_to_supervisor)
+
+            assert mock_configure_logging.called
+            if sending_to_supervisor:
+                assert calls == ["dictConfig"]
+                assert structlog.get_config()["processors"] == [initial_processor, final_renderer]
+            else:
+                assert calls == ["dictConfig", "load_remote_log_handler"]
+                assert structlog.get_config()["processors"] == [
+                    initial_processor,
+                    remote_processor,
+                    final_renderer,
+                ]
+        finally:
+            structlog.configure(processors=original_processors)
+            sdk_log.configure_logging.cache_clear()
+
+    @mock.patch("airflow.sdk._shared.logging.structlog.structlog_processors")
+    @mock.patch("airflow.sdk.log.load_remote_log_handler", return_value=object())
+    def test_allows_remote_handler_without_processors(
+        self, mock_load_remote_log_handler, mock_structlog_processors
+    ):
+        initial_processor = mock.Mock()
+        final_renderer = mock.Mock()
+        mock_structlog_processors.return_value = ([initial_processor], None, final_renderer)
+        sdk_log.logging_processors.cache_clear()
+
+        try:
+            processors = sdk_log.logging_processors(json_output=False)
+        finally:
+            sdk_log.logging_processors.cache_clear()
+
+        mock_load_remote_log_handler.assert_called_once_with()
+        assert processors == (initial_processor, sdk_log.mask_logs, final_renderer)
 
 
-def _make_logger():
-    """Build a FilteringBoundLogger-like object exposing ``_logger``."""
-    logger = mock.MagicMock()
-    logger._logger = mock.MagicMock()
-    return logger
+class TestMaskSecret:
+    def test_does_not_import_task_runner_outside_task_execution(self):
+        code = textwrap.dedent(
+            """
+            import sys
+            from airflow.sdk.log import mask_secret
 
+            mask_secret("s3cr3t")
+            print("airflow.sdk.execution_time.task_runner" in sys.modules)
+            """
+        )
 
-class TestUploadToRemote:
-    def test_warns_when_handler_unavailable(self):
-        ti = _make_ti()
-        with (
-            mock.patch.object(sdk_log, "load_remote_log_handler", return_value=None),
-            structlog.testing.capture_logs() as captured,
-        ):
-            sdk_log.upload_to_remote(_make_logger(), ti)
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
 
-        events = [e for e in captured if e["event"] == "remote_log_handler_unavailable"]
-        assert len(events) == 1
-        assert events[0]["log_level"] == "warning"
-        assert events[0]["ti_id"] == str(ti.id)
+        assert result.stdout.strip().splitlines()[-1] == "False"
 
-    def test_warns_when_path_resolution_fails(self):
-        ti = _make_ti()
-        handler = mock.MagicMock()
-        boom = RuntimeError("cannot resolve path")
-        with (
-            mock.patch.object(sdk_log, "load_remote_log_handler", return_value=handler),
-            mock.patch.object(sdk_log, "relative_path_from_logger", side_effect=boom),
-            structlog.testing.capture_logs() as captured,
-        ):
-            sdk_log.upload_to_remote(_make_logger(), ti)
+    def test_forwards_to_supervisor_in_task_execution(self, mock_supervisor_comms):
+        sdk_log.mask_secret("s3cr3t", name="password")
 
-        events = [e for e in captured if e["event"] == "remote_log_path_resolution_failed"]
-        assert len(events) == 1
-        assert events[0]["log_level"] == "warning"
-        assert events[0]["ti_id"] == str(ti.id)
-        assert events[0]["exc_info"] is boom
-        handler.upload.assert_not_called()
+        mock_supervisor_comms.send.assert_called_once_with(MaskSecret(value="s3cr3t", name="password"))
 
-    def test_warns_when_upload_fails(self, tmp_path):
-        ti = _make_ti()
-        handler = mock.MagicMock()
-        boom = RuntimeError("s3 unreachable")
-        handler.upload.side_effect = boom
-        relative = tmp_path / "dag_id" / "run_id" / "task.log"
-        with (
-            mock.patch.object(sdk_log, "load_remote_log_handler", return_value=handler),
-            mock.patch.object(sdk_log, "relative_path_from_logger", return_value=relative),
-            structlog.testing.capture_logs() as captured,
-        ):
-            sdk_log.upload_to_remote(_make_logger(), ti)
+    @pytest.mark.asyncio
+    async def test_async_forwards_to_supervisor_in_task_execution(self, mock_supervisor_comms):
+        await sdk_log.amask_secret("s3cr3t", name="password")
 
-        events = [e for e in captured if e["event"] == "remote_log_upload_failed"]
-        assert len(events) == 1
-        assert events[0]["log_level"] == "warning"
-        assert events[0]["ti_id"] == str(ti.id)
-        assert events[0]["log_relative_path"] == relative.as_posix()
-        assert events[0]["exc_info"] is boom
-        handler.upload.assert_called_once_with(relative.as_posix(), ti)
-
-    def test_silent_when_relative_path_is_none(self):
-        ti = _make_ti()
-        handler = mock.MagicMock()
-        with (
-            mock.patch.object(sdk_log, "load_remote_log_handler", return_value=handler),
-            mock.patch.object(sdk_log, "relative_path_from_logger", return_value=None),
-            structlog.testing.capture_logs() as captured,
-        ):
-            sdk_log.upload_to_remote(_make_logger(), ti)
-
-        assert captured == []
-        handler.upload.assert_not_called()
-
-    def test_silent_on_success(self, tmp_path):
-        ti = _make_ti()
-        handler = mock.MagicMock()
-        relative = tmp_path / "dag_id" / "run_id" / "task.log"
-        with (
-            mock.patch.object(sdk_log, "load_remote_log_handler", return_value=handler),
-            mock.patch.object(sdk_log, "relative_path_from_logger", return_value=relative),
-            structlog.testing.capture_logs() as captured,
-        ):
-            sdk_log.upload_to_remote(_make_logger(), ti)
-
-        assert captured == []
-        handler.upload.assert_called_once_with(relative.as_posix(), ti)
+        mock_supervisor_comms.asend.assert_awaited_once_with(MaskSecret(value="s3cr3t", name="password"))

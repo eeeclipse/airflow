@@ -18,10 +18,11 @@
  */
 /// <reference types="@testing-library/jest-dom" />
 import "@testing-library/jest-dom/vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { HITLDetailHistory, TaskInstanceHistoryResponse } from "openapi/requests/types.gen";
+
 import { Wrapper } from "src/utils/Wrapper";
 
 import { HITLResponseForm } from "./HITLResponseForm";
@@ -31,13 +32,16 @@ import { HITLResponseForm } from "./HITLResponseForm";
 // ---------------------------------------------------------------------------
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
+    i18n: { language: "en" },
     // eslint-disable-next-line id-length
     t: (key: string) => key,
   }),
 }));
 
+const { updateHITLResponse } = vi.hoisted(() => ({ updateHITLResponse: vi.fn() }));
+
 vi.mock("src/queries/useUpdateHITLDetail", () => ({
-  useUpdateHITLDetail: () => ({ updateHITLResponse: vi.fn() }),
+  useUpdateHITLDetail: () => ({ updateHITLResponse }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -138,5 +142,69 @@ describe("HITLResponseForm – option button rendering boundary", () => {
     renderForm(["Approve", "Reject"]);
     expect(screen.getByTestId("hitl-option-Approve")).toBeInTheDocument();
     expect(screen.getByTestId("hitl-option-Reject")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: pending-state enablement
+//
+// HITL tasks park in "deferred" (pre-3.3) or "awaiting_input" (from 3.3). Both
+// are "pending a response", so the option buttons must be enabled in either
+// state. Previously the form only treated "deferred" as pending, which disabled
+// the response form for awaiting_input tasks.
+// ---------------------------------------------------------------------------
+describe("HITLResponseForm – pending-state enablement", () => {
+  it("enables option buttons for a deferred task", () => {
+    renderForm(["Yes", "No"], {
+      task_instance: { ...MOCK_TASK_INSTANCE, state: "deferred" },
+    });
+    expect(screen.getByTestId("hitl-option-Yes")).toBeEnabled();
+    expect(screen.getByTestId("hitl-option-No")).toBeEnabled();
+  });
+
+  it("enables option buttons for an awaiting_input task", () => {
+    renderForm(["Yes", "No"], {
+      task_instance: { ...MOCK_TASK_INSTANCE, state: "awaiting_input" },
+    });
+    expect(screen.getByTestId("hitl-option-Yes")).toBeEnabled();
+    expect(screen.getByTestId("hitl-option-No")).toBeEnabled();
+  });
+
+  it("disables option buttons for a finished task", () => {
+    renderForm(["Yes", "No"], {
+      task_instance: { ...MOCK_TASK_INSTANCE, state: "success" },
+    });
+    expect(screen.getByTestId("hitl-option-Yes")).toBeDisabled();
+    expect(screen.getByTestId("hitl-option-No")).toBeDisabled();
+  });
+});
+
+describe("HITLResponseForm – the answer names the request it was given for", () => {
+  it("sends the created_at of the request the form was loaded for", () => {
+    updateHITLResponse.mockClear();
+    const loaded = "2026-10-14T01:00:00.123456Z";
+
+    renderForm(["Approve", "Reject"], { created_at: loaded });
+    fireEvent.click(screen.getByTestId("hitl-option-Approve"));
+
+    expect(updateHITLResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ chosen_options: ["Approve"], request_created_at: loaded }),
+    );
+  });
+
+  it("keeps the loaded created_at when the request under an open form is replaced", () => {
+    updateHITLResponse.mockClear();
+    const loaded = "2026-10-14T01:00:00.123456Z";
+    const { rerender } = renderForm(["Approve", "Reject"], { created_at: loaded });
+
+    // The task asked again while the form stayed open; a polled refetch hands the form the new request.
+    rerender(
+      <HITLResponseForm
+        hitlDetail={makeHITLDetail(["Approve", "Reject"], { created_at: "2026-10-14T01:05:00.000000Z" })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("hitl-option-Approve"));
+
+    expect(updateHITLResponse).toHaveBeenCalledWith(expect.objectContaining({ request_created_at: loaded }));
   });
 });

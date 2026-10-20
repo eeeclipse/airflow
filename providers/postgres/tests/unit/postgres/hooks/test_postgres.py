@@ -27,7 +27,7 @@ import pytest
 import sqlalchemy
 
 from airflow.models import Connection
-from airflow.providers.common.compat.sdk import AirflowException, AirflowOptionalProviderFeatureException
+from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
 from airflow.providers.postgres.dialects.postgres import PostgresDialect
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
@@ -56,6 +56,27 @@ if USE_PSYCOPG3:
     import psycopg.rows
 else:
     import psycopg2.extras
+
+
+def test_hooks_postgres_raises_clear_error_without_psycopg2(monkeypatch):
+    """PostgresHook must fail loudly (not with a bare ImportError or a real connection attempt)
+    when psycopg2-specific functionality is used but psycopg2 isn't installed."""
+    import airflow.providers.postgres.hooks.postgres as postgres_module
+
+    monkeypatch.setattr(postgres_module, "USE_PSYCOPG3", False)
+    monkeypatch.setattr(postgres_module, "ppg2_connect", None)
+    monkeypatch.setattr(postgres_module, "DictCursor", None)
+    monkeypatch.setattr(postgres_module, "RealDictCursor", None)
+    monkeypatch.setattr(postgres_module, "NamedTupleCursor", None)
+    monkeypatch.setattr(postgres_module, "execute_values", None)
+
+    hook = postgres_module.PostgresHook.__new__(postgres_module.PostgresHook)
+    with pytest.raises(AirflowOptionalProviderFeatureException, match="psycopg2 is not installed"):
+        hook._get_cursor("dictcursor")
+    with pytest.raises(AirflowOptionalProviderFeatureException, match="psycopg2 is not installed"):
+        hook._create_connection({})
+    with pytest.raises(AirflowOptionalProviderFeatureException, match="psycopg2 is not installed"):
+        hook.insert_rows(table="t", rows=[(1,)], fast_executemany=True)
 
 
 @pytest.fixture
@@ -89,7 +110,7 @@ class TestPostgresHookConn:
         )
         hook = PostgresHook(connection=conn)
 
-        with pytest.raises(AirflowException):
+        with pytest.raises(TypeError, match="'sqlalchemy_query' must be of type dict"):
             hook.sqlalchemy_url
 
     @pytest.mark.parametrize("aws_conn_id", [NOTSET, None, "mock_aws_conn"])
@@ -612,6 +633,93 @@ class TestPostgresHookConnPPG3:
         )
 
 
+class TestPostgresHookSqlalchemyScheme:
+    """Tests for overriding the SQLAlchemy ``drivername`` via the sqlalchemy_scheme extra/parameter."""
+
+    @staticmethod
+    def get_hook(extra: dict | None = None, **hook_kwargs) -> PostgresHook:
+        conn = Connection(
+            login="login-conn", password="password-conn", host="host", schema="database", extra=extra
+        )
+        return PostgresHook(connection=conn, **hook_kwargs)
+
+    @pytest.mark.parametrize("scheme", ["postgresql", "postgresql+psycopg2", "postgresql+psycopg"])
+    def test_sqlalchemy_scheme_from_extra(self, scheme):
+        hook = self.get_hook(extra=dict(sqlalchemy_scheme=scheme))
+        expected = f"{scheme}://login-conn:password-conn@host/database"
+        assert hook.sqlalchemy_url.render_as_string(hide_password=False) == expected
+
+    def test_sqlalchemy_scheme_parameter_takes_precedence_over_extra(self):
+        hook = self.get_hook(
+            extra=dict(sqlalchemy_scheme="postgresql"), sqlalchemy_scheme="postgresql+psycopg2"
+        )
+        expected = "postgresql+psycopg2://login-conn:password-conn@host/database"
+        assert hook.sqlalchemy_url.render_as_string(hide_password=False) == expected
+
+    def test_get_uri_with_sqlalchemy_scheme(self):
+        hook = self.get_hook(extra=dict(sqlalchemy_scheme="postgresql+psycopg2"))
+        assert hook.get_uri() == "postgresql+psycopg2://login-conn:password-conn@host/database"
+
+    @pytest.mark.parametrize("scheme", ["mysql", "mysql+pymysql", "postgres+psycopg2"])
+    def test_sqlalchemy_scheme_with_wrong_dialect(self, scheme):
+        hook = self.get_hook(extra=dict(sqlalchemy_scheme=scheme))
+        with pytest.raises(
+            ValueError, match="'sqlalchemy_scheme' must be 'postgresql' or 'postgresql\\+<driver>'"
+        ):
+            hook.sqlalchemy_url
+
+    @pytest.mark.parametrize("scheme", ["postgresql+psycopg2://malicious", "postgresql+psycopg2/malicious"])
+    def test_sqlalchemy_scheme_with_forbidden_characters(self, scheme):
+        hook = self.get_hook(extra=dict(sqlalchemy_scheme=scheme))
+        with pytest.raises(ValueError, match="must not contain ':' or '/' characters"):
+            hook.sqlalchemy_url
+
+
+@pytest.mark.backend("postgres")
+class TestPostgresHookPandasToSqlUuid:
+    """DataFrame.to_sql with string values into a uuid column: fails on psycopg3 because SQLAlchemy
+    renders typed bind casts, works when the connection opts back into psycopg2 via sqlalchemy_scheme."""
+
+    table = "test_pandas_to_sql_uuid_table"
+
+    PSYCOPG3_XFAIL_REASON = (
+        "The psycopg3 SQLAlchemy dialect renders typed bind casts, so string params fail with "
+        "'column is of type uuid but expression is of type character varying' instead of being "
+        "implicitly coerced as under psycopg2. Tracked upstream in "
+        "https://github.com/pandas-dev/pandas/issues/63511, "
+        "https://github.com/apache/arrow/pull/50325, "
+        "https://github.com/sqlalchemy/sqlalchemy/discussions/10839 and "
+        "https://github.com/sqlalchemy/sqlalchemy/issues/12060"
+    )
+
+    def teardown_method(self):
+        with PostgresHook().get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS {self.table}")
+
+    def insert_string_uuid_df(self, hook: PostgresHook) -> None:
+        engine = hook.get_sqlalchemy_engine()
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text(f"CREATE TABLE {self.table} (id UUID PRIMARY KEY, item TEXT)"))
+        df = pd.DataFrame({"id": ["b29d6cda-04ca-4073-8ef8-4f70d35e41e2"], "item": ["laptop"]})
+        df.to_sql(self.table, engine, if_exists="append", index=False)
+
+    @pytest.mark.skipif(not USE_PSYCOPG3, reason="psycopg v3 or sqlalchemy v2 not available")
+    @pytest.mark.xfail(
+        raises=(sqlalchemy.exc.ProgrammingError, pd.errors.DatabaseError),
+        strict=True,
+        reason=PSYCOPG3_XFAIL_REASON,
+    )
+    def test_to_sql_string_uuid_fails_on_psycopg3(self):
+        self.insert_string_uuid_df(PostgresHook())
+
+    def test_to_sql_string_uuid_works_with_psycopg2_scheme(self):
+        hook = PostgresHook(sqlalchemy_scheme="postgresql+psycopg2")
+        self.insert_string_uuid_df(hook)
+        with hook.get_sqlalchemy_engine().connect() as conn:
+            assert conn.execute(sqlalchemy.text(f"SELECT COUNT(*) FROM {self.table}")).scalar() == 1
+
+
 @pytest.mark.backend("postgres")
 class TestPostgresHook:
     """Tests that are identical between psycopg2 and psycopg3."""
@@ -911,6 +1019,35 @@ class _BasePostgresHookRuntimeTests:
         )
         self.cur.executemany.assert_any_call(sql, rows)
 
+    @mock.patch("airflow.providers.postgres.hooks.postgres.PostgresHook.insert_rows")
+    def test_upsert_rows(self, mock_insert_rows):
+
+        rows = [(1, "hello")]
+        table = "table"
+
+        self.db_hook.upsert_rows(
+            table=table,
+            rows=rows,
+            target_fields=["id", "value"],
+            conflict_fields=["id"],
+            update_fields=["value"],
+            commit_every=123,
+            fast_executemany=True,
+            autocommit=True,
+        )
+
+        mock_insert_rows.assert_called_once_with(
+            table=table,
+            rows=rows,
+            target_fields=["id", "value"],
+            replace_index=["id"],
+            replace_target=["value"],
+            commit_every=123,
+            replace=True,
+            fast_executemany=True,
+            autocommit=True,
+        )
+
     def test_dialect_name(self):
         assert self.db_hook.dialect_name == "postgresql"
 
@@ -1012,8 +1149,8 @@ class TestPostgresHookPPG2(_BasePostgresHookRuntimeTests):
         assert call_kw["sql"] == f"INSERT INTO {table}  VALUES (%s)"
         assert call_kw["row_count"] == 2
 
-    @mock.patch("airflow.providers.postgres.hooks.postgres.execute_batch")
-    def test_insert_rows_fast_executemany(self, mock_execute_batch):
+    @mock.patch("airflow.providers.postgres.hooks.postgres.execute_values")
+    def test_insert_rows_fast_executemany(self, mock_execute_values):
         table = "table"
         rows = [("hello",), ("world",)]
 
@@ -1025,9 +1162,9 @@ class TestPostgresHookPPG2(_BasePostgresHookRuntimeTests):
         commit_count = 2  # The first and last commit
         assert self.conn.commit.call_count == commit_count
 
-        mock_execute_batch.assert_called_once_with(
+        mock_execute_values.assert_called_once_with(
             self.cur,
-            f"INSERT INTO {table}  VALUES (%s)",  # expected SQL
+            f"INSERT INTO {table}  VALUES %s",  # expected SQL
             [("hello",), ("world",)],  # expected values
             page_size=1000,
         )
@@ -1036,9 +1173,8 @@ class TestPostgresHookPPG2(_BasePostgresHookRuntimeTests):
         self.cur.executemany.assert_not_called()
 
     @mock.patch("airflow.providers.postgres.hooks.postgres.send_sql_hook_lineage")
-    @mock.patch("airflow.providers.postgres.hooks.postgres.execute_batch")
-    def test_insert_rows_fast_executemany_hook_lineage(self, mock_execute_batch, mock_send_lineage):
-
+    @mock.patch("airflow.providers.postgres.hooks.postgres.execute_values")
+    def test_insert_rows_fast_executemany_hook_lineage(self, mock_execute_values, mock_send_lineage):
         table = "table"
         rows = [("hello",), ("world",)]
 
@@ -1047,8 +1183,27 @@ class TestPostgresHookPPG2(_BasePostgresHookRuntimeTests):
         mock_send_lineage.assert_called_once()
         call_kw = mock_send_lineage.call_args.kwargs
         assert call_kw["context"] is self.db_hook
-        assert call_kw["sql"] == f"INSERT INTO {table}  VALUES (%s)"
+        assert call_kw["sql"] == f"INSERT INTO {table}  VALUES %s"
         assert call_kw["row_count"] == 2
+
+    @mock.patch("airflow.providers.postgres.hooks.postgres.USE_PSYCOPG3", True)
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook.insert_rows")
+    def test_insert_rows_fast_executemany_psycopg3_fallback(self, mock_super_insert_rows):
+        """Verify psycopg3 falls back to default implementation even with fast_executemany=True."""
+        table = "table"
+        rows = [("hello",), ("world",)]
+
+        self.db_hook.insert_rows(table, rows, fast_executemany=True)
+
+        mock_super_insert_rows.assert_called_once_with(
+            table,
+            rows,
+            target_fields=None,
+            commit_every=1000,
+            replace=False,
+            executemany=False,
+            autocommit=False,
+        )
 
     @pytest.mark.usefixtures("reset_logging_config")
     def test_get_all_db_log_messages(self, mocker):
@@ -1179,10 +1334,6 @@ class TestPostgresHookPPG3(_BasePostgresHookRuntimeTests):
         )
         self.conn.commit.assert_called_once()
 
-    @pytest.mark.skip(reason="Notice handling is callback-based in psycopg3 and cannot be tested this way.")
-    def test_get_all_db_log_messages(self, mocker):
-        pass
-
     @pytest.mark.usefixtures("reset_logging_config")
     def test_log_db_messages_by_db_proc(self, mocker):
         proc_name = "raise_notice"
@@ -1207,3 +1358,17 @@ class TestPostgresHookPPG3(_BasePostgresHookRuntimeTests):
             mock_logger.info.assert_any_call("Message from db: 42")
         finally:
             hook.run(sql=f"DROP PROCEDURE {proc_name} (s text)")
+
+    @pytest.mark.usefixtures("reset_logging_config")
+    def test_insert_rows_fast_executemany_psycopg3_logs_warning(self, mocker):
+        mock_logger = mocker.patch("airflow.providers.postgres.hooks.postgres.PostgresHook.log")
+
+        table = "table"
+        rows = [("hello",), ("world",)]
+
+        self.db_hook.insert_rows(table, rows, fast_executemany=True)
+
+        mock_logger.warning.assert_called_once_with(
+            "fast_executemany=True has no effect when using psycopg3. "
+            "psycopg3's executemany already uses pipelining for optimal performance."
+        )

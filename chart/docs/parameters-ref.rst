@@ -81,11 +81,12 @@ and install the chart:
 Deprecated Parameters
 =====================
 
-The following table contains all deprecated configuration parameters of the Airflow chart with their default values. All values defined in below table with be removed
+The following table contains all deprecated configuration parameters of the Airflow chart with their default values. All values defined in below table will be removed
 in the next Helm Chart major release.
 
 .. jinja:: params_ctx
 
+   {% if deprecations_exist %}
    .. list-table::
       :widths: 15 10 30
       :header-rows: 1
@@ -111,3 +112,6 @@ in the next Helm Chart major release.
          {% endif %}
       {% endfor %}
    {% endfor %}
+   {% else %}
+   There are no deprecations within current release of Helm Chart.
+   {% endif %}

@@ -215,7 +215,7 @@ In the simplest case building your image consists of those steps:
 
 1) Create your own ``Dockerfile`` (name it ``Dockerfile``) where you add:
 
-* information what your image should be based on (for example ``FROM: apache/airflow:|airflow-version|-python3.10``
+* information what your image should be based on (for example ``FROM: apache/airflow:|airflow-version|-python3.11``
 
 * additional steps that should be executed in your image (typically in the form of ``RUN <command>``)
 
@@ -320,9 +320,9 @@ Naming conventions for the images:
 +----------------+--------------------------+---------------------------------+--------------------------------------+
 | Default        | 3.13                     | apache/airflow:X.Y.Z            | apache/airflow:slim-X.Y.Z            |
 +----------------+--------------------------+---------------------------------+--------------------------------------+
-| Latest         | 3.10,3.11,3.12,3.13,3.14 | apache/airflow:latest-pythonN.M | apache/airflow:slim-latest-pythonN.M |
+| Latest         | 3.11,3.12,3.13,3.14      | apache/airflow:latest-pythonN.M | apache/airflow:slim-latest-pythonN.M |
 +----------------+--------------------------+---------------------------------+--------------------------------------+
-| Specific       | 3.10,3.11,3.12,3.13,3.14 | apache/airflow:X.Y.Z-pythonN.M  | apache/airflow:slim-X.Y.Z-pythonN.M  |
+| Specific       | 3.11,3.12,3.13,3.14      | apache/airflow:X.Y.Z-pythonN.M  | apache/airflow:slim-X.Y.Z-pythonN.M  |
 +----------------+--------------------------+---------------------------------+--------------------------------------+
 
 * The "latest" image is always the latest released stable version available.
@@ -476,6 +476,28 @@ Note that similarly when adding individual packages, you need to use the ``airfl
 .. exampleinclude:: docker-examples/extending/add-requirement-packages/requirements.txt
     :language: text
 
+
+Example of adding a Python venv for ``ExternalPythonOperator``
+..............................................................
+
+The following example creates a separate Python virtualenv inside the image and installs packages
+from ``requirements.txt`` into it, leaving Airflow's own Python environment untouched. This is the
+typical setup for the
+:ref:`ExternalPythonOperator <apache-airflow-providers-standard:howto/operator:externalpythonoperator>`
+(or the ``@task.external_python`` decorator), which executes tasks in a pre-existing, immutable
+Python environment. Use ``/opt/airflow/venv/bin/python`` as the operator's ``python`` argument
+to run tasks in this venv.
+
+The venv is created without ``--system-site-packages``, so the packages installed inside it
+are isolated from Airflow's own dependencies.
+
+.. exampleinclude:: docker-examples/extending/add-python-venv/Dockerfile
+    :language: Dockerfile
+    :start-after: [START Dockerfile]
+    :end-before: [END Dockerfile]
+
+.. exampleinclude:: docker-examples/extending/add-python-venv/requirements.txt
+    :language: text
 
 Example when writable directory is needed
 .........................................
@@ -714,7 +736,7 @@ Building from PyPI packages
 
 This is the basic way of building the custom images from sources.
 
-The following example builds the production image in version ``3.10`` with latest PyPI-released Airflow,
+The following example builds the production image for the default Python version with latest PyPI-released Airflow,
 with default set of Airflow extras and dependencies. The latest PyPI-released Airflow constraints are used automatically.
 
 .. exampleinclude:: docker-examples/customizing/stable-airflow.sh
@@ -722,7 +744,7 @@ with default set of Airflow extras and dependencies. The latest PyPI-released Ai
     :start-after: [START build]
     :end-before: [END build]
 
-The following example builds the production image in version ``3.10`` with default extras from ``2.3.0`` Airflow
+The following example builds the production image for the default Python version with default extras from ``2.3.0`` Airflow
 package. The ``2.3.0`` constraints are used automatically.
 
 .. exampleinclude:: docker-examples/customizing/pypi-selected-version.sh
@@ -730,7 +752,7 @@ package. The ``2.3.0`` constraints are used automatically.
     :start-after: [START build]
     :end-before: [END build]
 
-The following example builds the production image in version ``3.10`` with additional Airflow extras
+The following example builds the production image for the default Python version with additional Airflow extras
 (``mssql,hdfs``) from ``2.3.0`` PyPI package, and additional dependency (``oauth2client``).
 
 .. exampleinclude:: docker-examples/customizing/pypi-extras-and-deps.sh
@@ -757,7 +779,7 @@ have more complex dependencies to build.
 Building optimized images
 .........................
 
-The following example builds the production image in version ``3.10`` with additional Airflow extras from
+The following example builds the production image for the default Python version with additional Airflow extras from
 PyPI package but it includes additional apt dev and runtime dependencies.
 
 The dev dependencies are those that require ``build-essential`` and usually need to involve recompiling

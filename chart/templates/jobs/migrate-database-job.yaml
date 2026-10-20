@@ -73,7 +73,9 @@ spec:
         {{- end }}
       {{- end }}
     spec:
+      {{- if $securityContext }}
       securityContext: {{ $securityContext | nindent 8 }}
+      {{- end }}
       restartPolicy: {{ .Values.migrateDatabaseJob.restartPolicy }}
       {{- if .Values.migrateDatabaseJob.priorityClassName }}
       priorityClassName: {{ .Values.migrateDatabaseJob.priorityClassName }}
@@ -96,7 +98,9 @@ spec:
         - name: run-airflow-migrations
           image: {{ template "airflow_image_for_migrations" . }}
           imagePullPolicy: {{ .Values.images.airflow.pullPolicy }}
+          {{- if $containerSecurityContext }}
           securityContext: {{ $containerSecurityContext | nindent 12 }}
+          {{- end }}
           {{- if $containerLifecycleHooks  }}
           lifecycle: {{- tpl (toYaml $containerLifecycleHooks) . | nindent 12 }}
           {{- end }}
@@ -122,7 +126,7 @@ spec:
           volumeMounts:
             {{- include "airflow_config_mount" . | nindent 12 }}
               {{- if .Values.volumeMounts }}
-            {{- toYaml .Values.volumeMounts | nindent 12 }}
+            {{- tpl (toYaml .Values.volumeMounts) . | nindent 12 }}
             {{- end }}
             {{- if .Values.migrateDatabaseJob.extraVolumeMounts }}
               {{- tpl (toYaml .Values.migrateDatabaseJob.extraVolumeMounts) . | nindent 12 }}
@@ -135,7 +139,7 @@ spec:
           configMap:
             name: {{ template "airflow_config" . }}
         {{- if .Values.volumes }}
-          {{- toYaml .Values.volumes | nindent 8 }}
+          {{- tpl (toYaml .Values.volumes) . | nindent 8 }}
         {{- end }}
         {{- if .Values.migrateDatabaseJob.extraVolumes }}
           {{- tpl (toYaml .Values.migrateDatabaseJob.extraVolumes) . | nindent 8 }}

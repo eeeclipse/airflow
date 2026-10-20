@@ -21,7 +21,7 @@ import datetime
 import inspect
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from json import JSONDecodeError
 from typing import TYPE_CHECKING, Any, cast, overload
 
@@ -221,7 +221,6 @@ class TriggerDagRunOperator(BaseOperator):
         self.openlineage_inject_parent_info = openlineage_inject_parent_info
         self.note = note
         self.deferrable = deferrable
-        logical_date = _validate_datetime_param("logical_date", logical_date)
         run_after = _validate_datetime_param("run_after", run_after)
         self.logical_date = logical_date
         self.run_after = run_after
@@ -232,6 +231,7 @@ class TriggerDagRunOperator(BaseOperator):
             )
 
     def execute(self, context: Context):
+        _validate_datetime_param("logical_date", self.logical_date)
         if self.logical_date is NOTSET:
             if self.run_after is not NOTSET:
                 parsed_logical_date = None
@@ -253,7 +253,7 @@ class TriggerDagRunOperator(BaseOperator):
                 self.conf = json.loads(self.conf)
             json.dumps(self.conf)
         except (TypeError, JSONDecodeError):
-            raise ValueError("conf parameter should be JSON Serializable %s", self.conf)
+            raise ValueError(f"conf parameter should be JSON Serializable: {self.conf}")
 
         if self.openlineage_inject_parent_info:
             self.log.debug("Checking if OpenLineage information can be safely injected into dagrun conf.")
@@ -324,6 +324,23 @@ class TriggerDagRunOperator(BaseOperator):
 
         if parsed_run_after and "run_after" in parameters:
             kwargs_accepted["run_after"] = parsed_run_after
+
+        if isinstance(context, Mapping):
+            from airflow.utils import helpers
+
+            try:
+                build_url_fn = getattr(helpers, "build_airflow_dagrun_url", None)
+                ti = context.get("task_instance") or context.get("ti")
+
+                if build_url_fn and ti and hasattr(ti, "xcom_push"):
+                    ti.xcom_push(
+                        key=TriggerDagRunLink().xcom_key,
+                        value=build_url_fn(dag_id=self.trigger_dag_id, run_id=run_id),
+                    )
+            except (AttributeError, KeyError, TypeError, AssertionError) as e:
+                self.log.debug(
+                    "Skipping TriggerDagRunLink XCom push due to mock or incomplete context: %s", e
+                )
 
         raise DagRunTriggerException(**kwargs_accepted)
 

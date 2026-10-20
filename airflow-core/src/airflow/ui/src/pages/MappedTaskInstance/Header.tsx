@@ -16,28 +16,45 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box } from "@chakra-ui/react";
 import type { ReactNode } from "react";
+
+import { Box, HStack } from "@chakra-ui/react";
 import { useTranslation } from "react-i18next";
 import { MdOutlineTask } from "react-icons/md";
 import { useParams } from "react-router-dom";
 
 import type { LightGridTaskInstanceSummary } from "openapi/requests/types.gen";
+
 import { ClearTaskInstanceButton } from "src/components/Clear";
 import { HeaderCard } from "src/components/HeaderCard";
 import Time from "src/components/Time";
-import { getDuration } from "src/utils";
+
+import { formatNumber, useDurationFormat } from "src/utils";
 
 export const Header = ({ taskInstance }: { readonly taskInstance: LightGridTaskInstanceSummary }) => {
   const { dagId = "", runId = "" } = useParams();
-  const { t: translate } = useTranslation();
-  const entries: Array<{ label: string; value: number | ReactNode | string }> = [];
+  const { i18n, t: translate } = useTranslation();
+  const { formatElapsed } = useDurationFormat();
+  const entries: Array<{ key?: string; label: string; value: number | ReactNode | string }> = [];
   let taskCount: number = 0;
 
-  Object.entries(taskInstance.child_states ?? {}).forEach(([taskState, count]) => {
+  Object.entries(taskInstance.child_states ?? {}).forEach(([state, count]) => {
     entries.push({
-      label: translate("total", { state: translate(`states.${taskState.toLowerCase()}`) }),
-      value: count,
+      key: state,
+      label: translate("total", { state: translate(`states.${state}`) }),
+      value: (
+        <HStack gap={2}>
+          <Box
+            bg={`${state}.solid`}
+            border="1px solid"
+            borderColor="border.emphasized"
+            borderRadius="2px"
+            height="10px"
+            width="10px"
+          />
+          {formatNumber(count, i18n.language)}
+        </HStack>
+      ),
     });
     taskCount += count;
   });
@@ -49,30 +66,31 @@ export const Header = ({ taskInstance }: { readonly taskInstance: LightGridTaskI
       ? [
           {
             label: translate("duration"),
-            value: getDuration(taskInstance.min_start_date, taskInstance.max_end_date),
+            value: formatElapsed(taskInstance.min_start_date, taskInstance.max_end_date),
           },
         ]
       : []),
   ];
 
   return (
-    <Box>
-      <HeaderCard
-        actions={
-          <ClearTaskInstanceButton
-            allMapped
-            dagId={dagId}
-            dagRunId={runId}
-            isHotkeyEnabled
-            taskId={taskInstance.task_id}
-          />
-        }
-        icon={<MdOutlineTask />}
-        state={taskInstance.state}
-        stats={stats}
-        subTitle={<Time datetime={taskInstance.min_start_date} />}
-        title={`${taskInstance.task_display_name} [${taskCount}]`}
-      />
-    </Box>
+    <HeaderCard
+      actions={
+        <ClearTaskInstanceButton
+          allMapped
+          bg="bg"
+          dagId={dagId}
+          dagRunId={runId}
+          isHotkeyEnabled
+          taskId={taskInstance.task_id}
+          variant="outline"
+        />
+      }
+      icon={<MdOutlineTask />}
+      state={taskInstance.state}
+      stats={stats}
+      subTitle={<Time datetime={taskInstance.min_start_date} />}
+      title={`${taskInstance.task_display_name} [${formatNumber(taskCount, i18n.language)}]`}
+      type="taskInstance"
+    />
   );
 };

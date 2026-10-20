@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from airflow.providers.common.ai.toolsets.mcp import MCPToolset
 
 _HOOK_PATH = "airflow.providers.common.ai.hooks.mcp.MCPHook"
@@ -43,7 +45,9 @@ class TestMCPToolsetGetServer:
         ts = MCPToolset("mcp_conn")
         server = ts._get_server()
 
-        mock_hook_cls.assert_called_once_with(mcp_conn_id="mcp_conn", tool_prefix=None)
+        mock_hook_cls.assert_called_once_with(
+            mcp_conn_id="mcp_conn", tool_prefix=None, token_provider=None, env_provider=None
+        )
         mock_hook_cls.return_value.get_conn.assert_called_once()
         assert server is mock_server
 
@@ -54,7 +58,37 @@ class TestMCPToolsetGetServer:
         ts = MCPToolset("mcp_conn", tool_prefix="weather")
         ts._get_server()
 
-        mock_hook_cls.assert_called_once_with(mcp_conn_id="mcp_conn", tool_prefix="weather")
+        mock_hook_cls.assert_called_once_with(
+            mcp_conn_id="mcp_conn", tool_prefix="weather", token_provider=None, env_provider=None
+        )
+
+    @patch(_HOOK_PATH, autospec=True)
+    def test_passes_token_provider_to_hook(self, mock_hook_cls):
+        mock_hook_cls.return_value.get_conn.return_value = MagicMock()
+
+        def provider() -> str:
+            return "minted"
+
+        ts = MCPToolset("mcp_conn", token_provider=provider)
+        ts._get_server()
+
+        mock_hook_cls.assert_called_once_with(
+            mcp_conn_id="mcp_conn", tool_prefix=None, token_provider=provider, env_provider=None
+        )
+
+    @patch(_HOOK_PATH, autospec=True)
+    def test_passes_env_provider_to_hook(self, mock_hook_cls):
+        mock_hook_cls.return_value.get_conn.return_value = MagicMock()
+
+        def env_provider() -> dict[str, str]:
+            return {"SPLUNK_API_KEY": "minted"}
+
+        ts = MCPToolset("mcp_conn", env_provider=env_provider)
+        ts._get_server()
+
+        mock_hook_cls.assert_called_once_with(
+            mcp_conn_id="mcp_conn", tool_prefix=None, token_provider=None, env_provider=env_provider
+        )
 
     @patch(_HOOK_PATH, autospec=True)
     def test_caches_server(self, mock_hook_cls):
@@ -98,3 +132,9 @@ class TestMCPToolsetDelegation:
 
         assert result == "tool result"
         mock_server.call_tool.assert_awaited_once_with("my_tool", {"arg": "value"}, ctx, tool)
+
+
+class TestMCPToolsetOutsidePydanticAI:
+    def test_points_other_frameworks_to_their_own_mcp_client(self):
+        with pytest.raises(NotImplementedError, match="framework's own MCP client"):
+            MCPToolset(mcp_conn_id="mcp_default").airflow_tools()

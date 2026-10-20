@@ -16,24 +16,29 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Button, Box, Spacer, HStack, Accordion, Text } from "@chakra-ui/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
+
+import { Button, Box, Spacer, HStack, Text } from "@chakra-ui/react";
 import { useTranslation } from "react-i18next";
 import { FiSend } from "react-icons/fi";
 import { useSearchParams } from "react-router-dom";
 
 import type { HITLDetailHistory, TaskInstanceHistoryResponse } from "openapi/requests/types.gen";
+
 import { FlexibleForm } from "src/components/FlexibleForm/FlexibleForm";
 import Time from "src/components/Time";
+
 import { useParamStore } from "src/queries/useParamStore";
 import { useUpdateHITLDetail } from "src/queries/useUpdateHITLDetail";
 import { DEFAULT_DATETIME_FORMAT } from "src/utils/datetimeUtils";
-import { getHITLParamsDict, getHITLFormData, getPreloadHITLFormData } from "src/utils/hitl";
+import { getHITLParamsDict, getHITLFormData, getPreloadHITLFormData, isHITLPending } from "src/utils/hitl";
 
 type HITLResponseFormProps = {
   readonly hitlDetail: {
     task_instance: TaskInstanceHistoryResponse;
   } & Omit<HITLDetailHistory, "task_instance">;
+  readonly namespace?: string;
+  readonly onResponded?: () => void;
 };
 
 const isHighlightOption = (
@@ -54,11 +59,13 @@ const isHighlightOption = (
   return isSelected ?? isDefault ?? !Boolean(hitlDetail.defaults);
 };
 
-export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
+export const HITLResponseForm = ({ hitlDetail, namespace = "hitl", onResponded }: HITLResponseFormProps) => {
   const { t: translate } = useTranslation("hitl");
   const [errors, setErrors] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const { paramsDict } = useParamStore("hitl");
+  const { paramsDict } = useParamStore(namespace);
+  // The request this form was loaded for. The server refuses the answer if the task has asked again since.
+  const loadedCreatedAt = useRef(hitlDetail.created_at);
   const [searchParams] = useSearchParams();
   const { preloadedHITLOptions } = getPreloadHITLFormData(searchParams, hitlDetail);
 
@@ -70,12 +77,15 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
   const shouldRenderOptionButton =
     hitlDetail.options.length <= 4 && !hitlDetail.multiple && preloadedHITLOptions.length === 0;
 
-  const isPending = hitlDetail.task_instance.state === "deferred";
+  const isPending = isHITLPending(hitlDetail.task_instance.state);
 
   const { updateHITLResponse } = useUpdateHITLDetail({
     dagId: hitlDetail.task_instance.dag_id,
     dagRunId: hitlDetail.task_instance.dag_run_id,
     mapIndex: hitlDetail.task_instance.map_index,
+    onSuccess: onResponded,
+    regionId: hitlDetail.task_instance.region_id,
+    regionIndex: hitlDetail.task_instance.region_index,
     taskId: hitlDetail.task_instance.task_id,
   });
 
@@ -89,7 +99,7 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
     try {
       const formData = getHITLFormData(paramsDict, option);
 
-      updateHITLResponse(formData);
+      updateHITLResponse({ ...formData, request_created_at: loadedCreatedAt.current });
     } catch {
       setErrors(true);
     }
@@ -108,14 +118,7 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
             : undefined}
         </Text>
       ) : undefined}
-      <Accordion.Root
-        defaultValue={[hitlDetail.subject]}
-        mb={4}
-        mt={4}
-        overflow="visible"
-        size="lg"
-        variant="enclosed"
-      >
+      <Box mb={4} mt={4} overflow="visible">
         <FlexibleForm
           disabled={!isPending || hitlDetail.response_received}
           flexFormDescription={hitlDetail.body ?? undefined}
@@ -125,10 +128,10 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
           }}
           isHITL
           key={hitlDetail.subject}
-          namespace="hitl"
+          namespace={namespace}
           setError={setErrors}
         />
-      </Accordion.Root>
+      </Box>
 
       <Box as="footer" display="flex" justifyContent="flex-end" mt={4}>
         <HStack w="full">

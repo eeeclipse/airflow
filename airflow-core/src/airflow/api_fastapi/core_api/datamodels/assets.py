@@ -19,17 +19,29 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
+from uuid import UUID
 
-from pydantic import AliasPath, AwareDatetime, ConfigDict, Field, JsonValue, NonNegativeInt, field_validator
+from pydantic import (
+    AliasPath,
+    AwareDatetime,
+    ConfigDict,
+    Field,
+    JsonValue,
+    NonNegativeInt,
+    StringConstraints,
+    field_validator,
+)
 
 from airflow._shared.secrets_masker import redact
 from airflow._shared.timezones import timezone
 from airflow.api_fastapi.core_api.base import BaseModel, StrictBaseModel
 from airflow.api_fastapi.core_api.datamodels.dag_run import TriggerDAGRunPostBody
+from airflow.models.base import ID_LEN
 from airflow.utils.types import DagRunType
 
 if TYPE_CHECKING:
+    from airflow.models.asset import AssetModel
     from airflow.serialization.definitions.dag import SerializedDAG
 
 
@@ -39,6 +51,7 @@ class DagScheduleAssetReference(StrictBaseModel):
     dag_id: str
     created_at: datetime
     updated_at: datetime
+    team_name: str | None = None
 
 
 class TaskInletAssetReference(StrictBaseModel):
@@ -57,6 +70,7 @@ class TaskOutletAssetReference(StrictBaseModel):
     task_id: str
     created_at: datetime
     updated_at: datetime
+    team_name: str | None = None
 
 
 class LastAssetEventResponse(BaseModel):
@@ -96,6 +110,51 @@ class AssetResponse(BaseModel):
     def redact_extra(cls, v: dict):
         return redact(v)
 
+    @classmethod
+    def from_asset_row(
+        cls,
+        asset: AssetModel,
+        last_asset_event_id: int | None,
+        last_asset_event_timestamp: datetime | None,
+        *,
+        readable_dag_ids: set[str] | None,
+    ) -> AssetResponse:
+        """
+        Build a response from an ``AssetModel`` row joined with its last AssetEvent id/timestamp.
+
+        The scheduled Dag, producing task and consuming task references are narrowed to the Dags in
+        ``readable_dag_ids``; ``None`` means the caller may read every Dag. It has no default so that
+        a new caller has to decide, rather than return every reference by omission.
+        """
+
+        def _readable(refs):
+            if readable_dag_ids is None:
+                return refs
+            return [ref for ref in refs if ref.dag_id in readable_dag_ids]
+
+        watchers_data = [
+            {
+                "name": watcher.name,
+                "trigger_id": watcher.trigger_id,
+                "created_date": watcher.trigger.created_date,
+            }
+            for watcher in asset.watchers
+        ]
+        return cls.model_validate(
+            {
+                **asset.__dict__,
+                "scheduled_dags": _readable(asset.scheduled_dags),
+                "producing_tasks": _readable(asset.producing_tasks),
+                "consuming_tasks": _readable(asset.consuming_tasks),
+                "aliases": asset.aliases,
+                "watchers": watchers_data,
+                "last_asset_event": {
+                    "id": last_asset_event_id,
+                    "timestamp": last_asset_event_timestamp,
+                },
+            }
+        )
+
 
 class AssetCollectionResponse(BaseModel):
     """Asset collection response."""
@@ -125,12 +184,19 @@ class DagRunAssetReference(StrictBaseModel):
     run_id: str
     dag_id: str
     logical_date: datetime | None
-    start_date: datetime
+    start_date: datetime | None
     end_date: datetime | None
     state: str
     data_interval_start: datetime | None
     data_interval_end: datetime | None
     partition_key: str | None
+    triggering: bool = Field(
+        description=(
+            "Whether this asset event triggered the referenced dag run. Only a run's most recent "
+            "consumed asset event triggers it; earlier consumed events are included in the run but "
+            "did not trigger it."
+        ),
+    )
 
 
 class AssetEventResponse(BaseModel):
@@ -146,6 +212,7 @@ class AssetEventResponse(BaseModel):
     source_dag_id: str | None = None
     source_run_id: str | None = None
     source_map_index: int
+    source_task_instance_id: UUID | None = None
     created_dagruns: list[DagRunAssetReference]
     timestamp: datetime
     partition_key: str | None = None
@@ -179,12 +246,22 @@ class QueuedEventCollectionResponse(BaseModel):
     total_entries: int
 
 
+class AssetEventAccessControl(StrictBaseModel):
+    """Access control settings for asset event consumer team filtering."""
+
+    consumer_teams: list[str] | None = None
+    allow_global: bool = True
+
+
 class CreateAssetEventsBody(StrictBaseModel):
     """Create asset events request."""
 
     asset_id: int
-    partition_key: str | None = None
+    # pattern (not strip_whitespace) so the value isn't mutated — must stay byte-identical to what
+    # `_validate_outlet_event_partition_keys` in the Execution API accepts for the same raw input.
+    partition_key: Annotated[str, StringConstraints(pattern=r"\S", max_length=ID_LEN)] | None = None
     extra: dict = Field(default_factory=dict)
+    access_control: AssetEventAccessControl | None = None
 
     @field_validator("extra", mode="after")
     def set_from_rest_api(cls, v: dict) -> dict:

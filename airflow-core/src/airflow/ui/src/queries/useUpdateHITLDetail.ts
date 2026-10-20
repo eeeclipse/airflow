@@ -16,21 +16,26 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
 import {
   UseDagRunServiceGetDagRunKeyFn,
+  useDagServiceGetDagsUiKey,
   useDagRunServiceGetDagRunsKey,
   UseGanttServiceGetGanttDataKeyFn,
   useTaskInstanceServiceGetHitlDetailsKey,
   useTaskInstanceServiceGetHitlDetailKey,
+  useTaskInstanceServiceGetHitlDetailTryDetailKey,
   useTaskInstanceServiceUpdateHitlDetail,
   useTaskInstanceServiceGetTaskInstanceKey,
   useTaskInstanceServiceGetTaskInstancesKey,
 } from "openapi/queries";
-import { toaster } from "src/components/ui/Toaster";
+
+import { toaster } from "src/system-components";
+
 import { createErrorToaster } from "src/utils";
 import type { HITLResponseParams } from "src/utils/hitl";
 
@@ -40,24 +45,32 @@ export const useUpdateHITLDetail = ({
   dagId,
   dagRunId,
   mapIndex,
+  onSuccess,
+  regionId,
+  regionIndex,
   taskId,
 }: {
   dagId: string;
   dagRunId: string;
   mapIndex: number | undefined;
+  onSuccess?: () => void;
+  regionId?: string;
+  regionIndex?: number;
   taskId: string;
 }) => {
   const queryClient = useQueryClient();
   const [error, setError] = useState<unknown>(undefined);
   const { t: translate } = useTranslation("hitl");
-  const onSuccess = async () => {
+  const handleSuccess = async () => {
     const queryKeys = [
       UseDagRunServiceGetDagRunKeyFn({ dagId, dagRunId }),
       [useDagRunServiceGetDagRunsKey],
       [useTaskInstanceServiceGetTaskInstancesKey, { dagId, dagRunId }],
       [useTaskInstanceServiceGetTaskInstanceKey, { dagId, dagRunId, mapIndex, taskId }],
-      [useTaskInstanceServiceGetHitlDetailsKey, { dagIdPrefixPattern: dagId, dagRunId }],
+      [useDagServiceGetDagsUiKey],
+      [useTaskInstanceServiceGetHitlDetailsKey],
       [useTaskInstanceServiceGetHitlDetailKey, { dagId, dagRunId }],
+      [useTaskInstanceServiceGetHitlDetailTryDetailKey, { dagId, dagRunId }],
       UseGanttServiceGetGanttDataKeyFn({ dagId, runId: dagRunId }),
       ...tiPerAttemptQueryKeys,
     ];
@@ -71,15 +84,25 @@ export const useUpdateHITLDetail = ({
       title: translate("response.success", { taskId }),
       type: "success",
     });
+    onSuccess?.();
   };
 
-  const onError = (apiError: unknown) => {
+  const onError = async (apiError: unknown) => {
     createErrorToaster(apiError, { titleKey: "hitl:response.error" }, translate);
+    // A refused answer (the request was replaced or already answered) leaves a stale request on
+    // screen; reload it so the next answer goes to what is waiting now.
+    await Promise.all(
+      [
+        [useTaskInstanceServiceGetHitlDetailsKey],
+        [useTaskInstanceServiceGetHitlDetailKey, { dagId, dagRunId }],
+        [useTaskInstanceServiceGetHitlDetailTryDetailKey, { dagId, dagRunId }],
+      ].map((key) => queryClient.invalidateQueries({ queryKey: key })),
+    );
   };
 
   const { isPending, mutate } = useTaskInstanceServiceUpdateHitlDetail({
     onError,
-    onSuccess,
+    onSuccess: handleSuccess,
   });
 
   const updateHITLResponse = (updateHITLResponseRequestBody: HITLResponseParams) => {
@@ -88,6 +111,7 @@ export const useUpdateHITLDetail = ({
     const requestBody = {
       chosen_options: updateHITLResponseRequestBody.chosen_options ?? [],
       params_input: updateHITLResponseRequestBody.params_input ?? {},
+      request_created_at: updateHITLResponseRequestBody.request_created_at,
     };
 
     try {
@@ -95,6 +119,8 @@ export const useUpdateHITLDetail = ({
         dagId,
         dagRunId,
         mapIndex: mapIndexValue,
+        regionId,
+        regionIndex,
         requestBody,
         taskId,
       });

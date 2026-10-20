@@ -43,7 +43,6 @@ prek hooks.
 
 We have integrated the `prek <https://github.com/j178/prek>`__ framework
 in our development workflow. It can be installed in various ways and does not even need ``pip`` or
-
 ``python`` to be installed. It is a drop-in replacement for the legacy ``pre-commit`` tool, but it is
 much faster and more feature-rich. It is written in Rust and it is designed to install environments in parallel,
 so it is much faster than the ``pre-commit`` tool.
@@ -226,6 +225,21 @@ You can always skip running the tests by providing ``--no-verify`` flag to the
 
 To check other usage types of the pre-commit framework, see `Pre-commit website <https://pre-commit.com/>`__.
 
+.. AGENT-SKILL-START
+   type: agents-md-commands
+   order: 30
+   lines:
+     - "- **Type-check (non-providers):** run the prek hook \u2014 `prek run mypy-<project> --all-files` (e.g. `mypy-airflow-core`, `mypy-task-sdk`, `mypy-shared-logging`; each `shared/<dist>` workspace member has its own `mypy-shared-<dist>` hook). The hook uses a dedicated virtualenv and mypy cache under `.build/mypy-venvs/<hook>/` and `.build/mypy-caches/<hook>/`; mypy itself is installed from `uv.lock` via the `mypy` dependency group (`uv sync --group mypy`), so it never mutates your project `.venv`. The hook prefers `uv` from the project's main `.venv/bin/uv` (installed by `uv sync` \u2014 `uv` is part of the `dev` dependency group via the `all` extras) for a project-pinned uv version; it falls back to `uv` on `$PATH` with a warning if that binary is missing. Clear with `breeze down --cleanup-mypy-cache`."
+     - "- **Type-check (providers):** `breeze run mypy path/to/code`"
+     - "- **Lint with ruff only:** `prek run ruff --from-ref <target_branch>`"
+     - "- **Format with ruff only:** `prek run ruff-format --from-ref <target_branch>`"
+     - "- **Run regular (fast) static checks:** `prek run --from-ref <target_branch> --stage pre-commit`"
+     - "- **Run manual (slower) checks:** `prek run --from-ref <target_branch> --stage manual --skip compile-ui-assets-dev --skip view-skill-eval --skip run-skill-eval-codex` (the skipped hooks start long-running local servers or provision the opt-in Codex environment rather than run checks that complete)"
+     - "- **Build docs:** `breeze build-docs`"
+     - "- **List the local verification for your changes:** `breeze verify` (add `--full` for everything CI runs for the default matrix cell except static checks, `--json` for machine-readable output). It uses the same selective-checks logic as CI."
+     - "- **Determine which tests to run based on changed files:** `breeze ci selective-check --commit-ref <commit_with_squashed_changes>`"
+.. AGENT-SKILL-END
+
 Disabling particular checks
 ---------------------------
 
@@ -343,7 +357,7 @@ To show unused mypy ignores, run:
   prek mypy-airflow-core --all-files
 
 For **providers**, mypy still runs via breeze (``breeze run mypy``) as a separate CI job and requires
-``breeze ci-image build --python 3.10`` to be built locally. Providers use a separate docker-volume
+``breeze ci-image build --python 3.11`` to be built locally. Providers use a separate docker-volume
 (called ``mypy-cache-volume``) that keeps the cache of last MyPy execution.
 
 To clear all mypy caches (the Docker volume used by providers, any legacy repo-root ``.mypy_cache``,

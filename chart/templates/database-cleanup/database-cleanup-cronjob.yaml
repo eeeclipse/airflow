@@ -91,12 +91,16 @@ spec:
           serviceAccountName: {{ include "databaseCleanup.serviceAccountName" . }}
           enableServiceLinks: {{ .Values.enableServiceLinks }}
           imagePullSecrets: {{- include "image_pull_secrets" . | nindent 12 }}
+          {{- if $securityContext }}
           securityContext: {{ $securityContext | nindent 12 }}
+          {{- end }}
           containers:
             - name: database-cleanup
               image: {{ template "airflow_image" . }}
               imagePullPolicy: {{ .Values.images.airflow.pullPolicy }}
+              {{- if $containerSecurityContext }}
               securityContext: {{ $containerSecurityContext | nindent 16 }}
+              {{- end }}
               {{- if $containerLifecycleHooks }}
               lifecycle: {{- tpl (toYaml $containerLifecycleHooks) . | nindent 16 }}
               {{- end }}
@@ -117,7 +121,7 @@ spec:
               volumeMounts:
                 {{- include "airflow_config_mount" . | nindent 16 }}
                 {{- if .Values.volumeMounts }}
-                  {{- toYaml .Values.volumeMounts | nindent 16 }}
+                  {{- tpl (toYaml .Values.volumeMounts) . | nindent 16 }}
                 {{- end }}
               resources: {{- toYaml .Values.databaseCleanup.resources | nindent 16 }}
           volumes:
@@ -125,6 +129,6 @@ spec:
               configMap:
                 name: {{ template "airflow_config" . }}
             {{- if .Values.volumes }}
-              {{- toYaml .Values.volumes | nindent 12 }}
+              {{- tpl (toYaml .Values.volumes) . | nindent 12 }}
             {{- end }}
 {{- end }}
